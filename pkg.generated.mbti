@@ -41,6 +41,7 @@ pub fn Grid::equal(Self, Self) -> Bool
 pub fn Grid::face_pixel(Self, FaceXY) -> Int32 raise HealpixError
 pub fn Grid::from_level(Int32) -> Self raise HealpixError
 pub fn Grid::level(Self) -> Int32
+pub fn Grid::lonlat_to_nested(Self, LonLat) -> Int32 raise HealpixError
 pub fn Grid::new(Int32) -> Self raise HealpixError
 pub fn Grid::not_equal(Self, Self) -> Bool
 pub fn Grid::npix(Self) -> Int32
@@ -50,6 +51,7 @@ pub fn Grid::pixel_face(Self, Int32) -> FaceXY raise HealpixError
 pub fn Grid::resolution(Self) -> Double
 pub fn Grid::to_repr(Self) -> @debug.Repr
 pub fn Grid::validate_pixel(Self, Int32) -> Unit raise HealpixError
+pub fn Grid::vector_to_nested(Self, Vector) -> Int32 raise HealpixError
 
 pub struct LonLat {
   lon : Double
