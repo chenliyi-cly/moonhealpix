@@ -52,9 +52,8 @@ pub fn Grid::query_disc(
       @math.PI
     } else {
       let threshold = (cos_radius - a) / b
-      if threshold > 1.0 + 1.0e-13 {
-        continue
-      }
+      // Cancellation near a pole can put a valid center above one.
+      // Clamp conservatively; the exact separation test rejects false hits.
       @math.acos(clamp(threshold, -1.0, 1.0))
     }
     let step = ring.longitude_step()

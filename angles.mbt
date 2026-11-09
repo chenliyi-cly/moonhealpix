@@ -92,6 +92,12 @@ pub fn LonLat::latitude_degrees(self : LonLat) -> Double {
 
 ///|
 pub fn LonLat::vector(self : LonLat) -> Vector {
+  if self.lat == @math.PI / 2.0 {
+    return { x: 0.0, y: 0.0, z: 1.0, }
+  }
+  if self.lat == -@math.PI / 2.0 {
+    return { x: 0.0, y: 0.0, z: -1.0, }
+  }
   let c = @math.cos(self.lat)
   {
     x: c * @math.cos(self.lon),

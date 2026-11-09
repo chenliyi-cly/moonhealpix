@@ -103,7 +103,11 @@ pub fn Catalog::bin_values(
       total_weights[p] = Some(weight)
       sums[p] = Some(sum)
       means[p] = Some(mean)
-      variances[p] = Some((m2 / weight).max(0.0))
+      let variance = m2 / weight
+      if !finite(variance) {
+        raise InvalidData
+      }
+      variances[p] = Some(variance.max(0.0))
     }
   }
   {
