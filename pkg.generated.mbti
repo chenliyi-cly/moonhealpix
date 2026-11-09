@@ -24,6 +24,25 @@ pub fn HealpixError::not_equal(Self, Self) -> Bool
 pub fn HealpixError::to_repr(Self) -> @debug.Repr
 
 // Types and methods
+pub struct Cell {
+  grid : Grid
+  pixel : Int32
+} derive(Eq, @debug.Debug)
+pub fn Cell::area(Self) -> Double
+pub fn Cell::center(Self) -> LonLat raise HealpixError
+pub fn Cell::children(Self, Int32, Int32) -> Array[Self] raise HealpixError
+pub fn Cell::contains(Self, Self) -> Bool
+pub fn Cell::descendant_range(Self, Int32) -> PixelRange raise HealpixError
+pub fn Cell::equal(Self, Self) -> Bool
+pub fn Cell::from_uniq(Int32) -> Self raise HealpixError
+pub fn Cell::grid(Self) -> Grid
+pub fn Cell::new(Grid, Int32) -> Self raise HealpixError
+pub fn Cell::not_equal(Self, Self) -> Bool
+pub fn Cell::parent(Self, Int32) -> Self raise HealpixError
+pub fn Cell::pixel(Self) -> Int32
+pub fn Cell::to_repr(Self) -> @debug.Repr
+pub fn Cell::uniq(Self) -> Int32
+
 pub struct FaceXY {
   face : Int32
   x : Int32
