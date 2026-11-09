@@ -1,0 +1,40 @@
+// Generated using `moon info`, DON'T EDIT IT
+package "chenliyi-cly/moonhealpix"
+
+import {
+  "moonbitlang/core/debug",
+}
+
+// Values
+
+// Errors
+pub suberror HealpixError {
+  InvalidNside(Int32)
+  InvalidPixel(Int32)
+  InvalidOrder(Int32)
+} derive(Eq, @debug.Debug)
+pub fn HealpixError::equal(Self, Self) -> Bool
+pub fn HealpixError::not_equal(Self, Self) -> Bool
+pub fn HealpixError::to_repr(Self) -> @debug.Repr
+
+// Types and methods
+pub struct Grid {
+  nside : Int32
+  level : Int32
+  npix : Int32
+} derive(Eq, @debug.Debug)
+pub fn Grid::equal(Self, Self) -> Bool
+pub fn Grid::from_level(Int32) -> Self raise HealpixError
+pub fn Grid::level(Self) -> Int32
+pub fn Grid::new(Int32) -> Self raise HealpixError
+pub fn Grid::not_equal(Self, Self) -> Bool
+pub fn Grid::npix(Self) -> Int32
+pub fn Grid::nside(Self) -> Int32
+pub fn Grid::pixel_area(Self) -> Double
+pub fn Grid::resolution(Self) -> Double
+pub fn Grid::to_repr(Self) -> @debug.Repr
+pub fn Grid::validate_pixel(Self, Int32) -> Unit raise HealpixError
+
+// Type aliases
+
+// Traits
