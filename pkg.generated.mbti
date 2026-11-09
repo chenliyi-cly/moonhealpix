@@ -16,6 +16,8 @@ pub suberror HealpixError {
   InvalidVector
   InvalidFace
   InvalidRange
+  ResourceLimit
+  IncompatibleGrid
 } derive(Eq, @debug.Debug)
 pub fn HealpixError::equal(Self, Self) -> Bool
 pub fn HealpixError::not_equal(Self, Self) -> Bool
@@ -88,6 +90,35 @@ pub(all) enum Ordering {
 pub fn Ordering::equal(Self, Self) -> Bool
 pub fn Ordering::not_equal(Self, Self) -> Bool
 pub fn Ordering::to_repr(Self) -> @debug.Repr
+
+pub struct PixelRange {
+  start : Int32
+  end : Int32
+} derive(Eq, @debug.Debug)
+pub fn PixelRange::end(Self) -> Int32
+pub fn PixelRange::equal(Self, Self) -> Bool
+pub fn PixelRange::length(Self) -> Int32
+pub fn PixelRange::new(Grid, Int32, Int32) -> Self raise HealpixError
+pub fn PixelRange::not_equal(Self, Self) -> Bool
+pub fn PixelRange::start(Self) -> Int32
+pub fn PixelRange::to_repr(Self) -> @debug.Repr
+
+pub struct PixelSet {
+  grid : Grid
+  ordering : Ordering
+  spans : Array[PixelRange]
+}
+pub fn PixelSet::complement(Self) -> Self raise HealpixError
+pub fn PixelSet::contains(Self, Int32) -> Bool
+pub fn PixelSet::count(Self) -> Int32
+pub fn PixelSet::difference(Self, Self) -> Self raise HealpixError
+pub fn PixelSet::grid(Self) -> Grid
+pub fn PixelSet::intersection(Self, Self) -> Self raise HealpixError
+pub fn PixelSet::new(Grid, Ordering, Array[PixelRange]) -> Self raise HealpixError
+pub fn PixelSet::ordering(Self) -> Ordering
+pub fn PixelSet::pixels(Self, Int32) -> Array[Int32] raise HealpixError
+pub fn PixelSet::ranges(Self) -> Array[PixelRange]
+pub fn PixelSet::union(Self, Self) -> Self raise HealpixError
 
 pub struct RingInfo {
   number : Int32

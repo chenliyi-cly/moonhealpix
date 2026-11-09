@@ -7,6 +7,8 @@ pub suberror HealpixError {
   InvalidVector
   InvalidFace
   InvalidRange
+  ResourceLimit
+  IncompatibleGrid
 } derive(Eq, Debug)
 
 ///|
