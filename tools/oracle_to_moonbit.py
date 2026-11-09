@@ -5,7 +5,7 @@
 
 Run from any directory: python tools/oracle_to_moonbit.py
 Use --check to verify byte-for-byte reproducibility without writing files.
-Uses Python's standard library and the installed 20261028 moonfmt executable.
+Uses Python's standard library and the installed moonfmt executable from the selected stable toolchain.
 The oracle is never recomputed. Override the formatter with --moonfmt PATH.
 Generated tests are test data, not production MoonBit code. NUNIQ is omitted.
 """

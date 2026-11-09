@@ -1,4 +1,5 @@
 ///|
+#derive(Eq, Debug)
 pub suberror HealpixError {
   InvalidNside(Int32)
   InvalidPixel(Int32)
@@ -10,16 +11,17 @@ pub suberror HealpixError {
   ResourceLimit
   IncompatibleGrid
   InvalidData
-} derive(Eq, Debug)
+}
 
 ///|
 /// A validated power-of-two resolution. The maximum is chosen so every
 /// pixel index and NUNIQ identifier fits a signed 32-bit integer.
+#derive(Eq, Debug)
 pub struct Grid {
   nside : Int32
   level : Int32
   npix : Int32
-} derive(Eq, Debug)
+}
 
 ///|
 pub fn Grid::new(nside : Int32) -> Grid raise HealpixError {

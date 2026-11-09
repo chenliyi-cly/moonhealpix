@@ -1,8 +1,9 @@
 ///|
+#derive(Eq, Debug)
 pub(all) enum Ordering {
   Ring
   Nested
-} derive(Eq, Debug)
+}
 
 ///|
 pub extend Ordering with Eq::{equal, not_equal}

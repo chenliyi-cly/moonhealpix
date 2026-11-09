@@ -1,9 +1,10 @@
 ///|
 /// A single NESTED cell, with its own resolution. NUNIQ is not a MOC document.
+#derive(Eq, Debug)
 pub struct Cell {
   grid : Grid
   pixel : Int32
-} derive(Eq, Debug)
+}
 
 ///|
 pub extend Cell with Eq::{equal, not_equal}

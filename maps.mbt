@@ -98,6 +98,7 @@ pub fn ScalarMap::with_value(
 }
 
 ///|
+#derive(Eq, Debug)
 pub struct Summary {
   count : Int32
   missing : Int32
@@ -106,7 +107,7 @@ pub struct Summary {
   variance : Double
   minimum : Double
   maximum : Double
-} derive(Eq, Debug)
+}
 
 ///|
 pub extend Summary with Eq::{equal, not_equal}

@@ -1,9 +1,10 @@
 ///|
 /// Mean: intensive field. Sum: integrated quantity per pixel.
+#derive(Eq, Debug)
 pub(all) enum ResampleMode {
   Mean
   Sum
-} derive(Eq, Debug)
+}
 
 ///|
 pub extend ResampleMode with Eq::{equal, not_equal}

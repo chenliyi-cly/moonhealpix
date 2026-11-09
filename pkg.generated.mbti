@@ -8,6 +8,7 @@ import {
 // Values
 
 // Errors
+#derive(Eq, @debug.Debug)
 pub suberror HealpixError {
   InvalidNside(Int32)
   InvalidPixel(Int32)
@@ -19,7 +20,7 @@ pub suberror HealpixError {
   ResourceLimit
   IncompatibleGrid
   InvalidData
-} derive(Eq, @debug.Debug)
+}
 pub fn HealpixError::equal(Self, Self) -> Bool
 pub fn HealpixError::not_equal(Self, Self) -> Bool
 pub fn HealpixError::to_repr(Self) -> @debug.Repr
@@ -56,10 +57,11 @@ pub fn Catalog::source(Self, Int32) -> LonLat raise HealpixError
 
 type CatalogBin
 
+#derive(Eq, @debug.Debug)
 pub struct Cell {
   grid : Grid
   pixel : Int32
-} derive(Eq, @debug.Debug)
+}
 pub fn Cell::area(Self) -> Double
 pub fn Cell::boundary(Self, Int32, Int32) -> Array[LonLat] raise HealpixError
 pub fn Cell::center(Self) -> LonLat raise HealpixError
@@ -76,22 +78,24 @@ pub fn Cell::pixel(Self) -> Int32
 pub fn Cell::to_repr(Self) -> @debug.Repr
 pub fn Cell::uniq(Self) -> Int32
 
+#derive(Eq, @debug.Debug)
 pub struct FaceXY {
   face : Int32
   x : Int32
   y : Int32
-} derive(Eq, @debug.Debug)
+}
 pub fn FaceXY::components(Self) -> (Int32, Int32, Int32)
 pub fn FaceXY::equal(Self, Self) -> Bool
 pub fn FaceXY::new(Grid, Int32, Int32, Int32) -> Self raise HealpixError
 pub fn FaceXY::not_equal(Self, Self) -> Bool
 pub fn FaceXY::to_repr(Self) -> @debug.Repr
 
+#derive(Eq, @debug.Debug)
 pub struct Grid {
   nside : Int32
   level : Int32
   npix : Int32
-} derive(Eq, @debug.Debug)
+}
 pub fn Grid::center(Self, Int32, Ordering) -> LonLat raise HealpixError
 pub fn Grid::convert(Self, Int32, Ordering, Ordering) -> Int32 raise HealpixError
 pub fn Grid::cover_cells(Self, Array[Cell], Int32) -> PixelSet raise HealpixError
@@ -123,10 +127,11 @@ pub fn Grid::to_repr(Self) -> @debug.Repr
 pub fn Grid::validate_pixel(Self, Int32) -> Unit raise HealpixError
 pub fn Grid::vector_to_nested(Self, Vector) -> Int32 raise HealpixError
 
+#derive(Eq, @debug.Debug)
 pub struct LonLat {
   lon : Double
   lat : Double
-} derive(Eq, @debug.Debug)
+}
 pub fn LonLat::degrees(Double, Double) -> Self raise HealpixError
 pub fn LonLat::equal(Self, Self) -> Bool
 pub fn LonLat::latitude(Self) -> Double
@@ -149,18 +154,20 @@ pub fn LonLatBox::contains(Self, LonLat) -> Bool
 pub fn LonLatBox::degrees(Double, Double, Double, Double) -> Self raise HealpixError
 pub fn LonLatBox::new(Double, Double, Double, Double) -> Self raise HealpixError
 
+#derive(Eq, @debug.Debug)
 pub(all) enum Ordering {
   Ring
   Nested
-} derive(Eq, @debug.Debug)
+}
 pub fn Ordering::equal(Self, Self) -> Bool
 pub fn Ordering::not_equal(Self, Self) -> Bool
 pub fn Ordering::to_repr(Self) -> @debug.Repr
 
+#derive(Eq, @debug.Debug)
 pub struct PixelRange {
   start : Int32
   end : Int32
-} derive(Eq, @debug.Debug)
+}
 pub fn PixelRange::end(Self) -> Int32
 pub fn PixelRange::equal(Self, Self) -> Bool
 pub fn PixelRange::length(Self) -> Int32
@@ -189,21 +196,23 @@ pub fn PixelSet::ranges(Self) -> Array[PixelRange]
 pub fn PixelSet::reorder(Self, Ordering, Int32) -> Self raise HealpixError
 pub fn PixelSet::union(Self, Self) -> Self raise HealpixError
 
+#derive(Eq, @debug.Debug)
 pub(all) enum ResampleMode {
   Mean
   Sum
-} derive(Eq, @debug.Debug)
+}
 pub fn ResampleMode::equal(Self, Self) -> Bool
 pub fn ResampleMode::not_equal(Self, Self) -> Bool
 pub fn ResampleMode::to_repr(Self) -> @debug.Repr
 
+#derive(Eq, @debug.Debug)
 pub struct RingInfo {
   number : Int32
   start : Int32
   count : Int32
   latitude : Double
   first_longitude : Double
-} derive(Eq, @debug.Debug)
+}
 pub fn RingInfo::count(Self) -> Int32
 pub fn RingInfo::equal(Self, Self) -> Bool
 pub fn RingInfo::first_longitude(Self) -> Double
@@ -233,16 +242,18 @@ pub fn ScalarMap::summary(Self) -> Summary? raise HealpixError
 pub fn ScalarMap::values(Self) -> Array[Double?]
 pub fn ScalarMap::with_value(Self, Int32, Double?) -> Self raise HealpixError
 
+#derive(Eq, @debug.Debug)
 pub struct SourceHit {
   index : Int32
   distance : Double
-} derive(Eq, @debug.Debug)
+}
 pub fn SourceHit::distance(Self) -> Double
 pub fn SourceHit::equal(Self, Self) -> Bool
 pub fn SourceHit::index(Self) -> Int32
 pub fn SourceHit::not_equal(Self, Self) -> Bool
 pub fn SourceHit::to_repr(Self) -> @debug.Repr
 
+#derive(Eq, @debug.Debug)
 pub struct Summary {
   count : Int32
   missing : Int32
@@ -251,7 +262,7 @@ pub struct Summary {
   variance : Double
   minimum : Double
   maximum : Double
-} derive(Eq, @debug.Debug)
+}
 pub fn Summary::count(Self) -> Int32
 pub fn Summary::equal(Self, Self) -> Bool
 pub fn Summary::maximum(Self) -> Double
@@ -263,11 +274,12 @@ pub fn Summary::sum(Self) -> Double
 pub fn Summary::to_repr(Self) -> @debug.Repr
 pub fn Summary::variance(Self) -> Double
 
+#derive(Eq, @debug.Debug)
 pub struct Vector {
   x : Double
   y : Double
   z : Double
-} derive(Eq, @debug.Debug)
+}
 pub fn Vector::components(Self) -> (Double, Double, Double)
 pub fn Vector::dot(Self, Self) -> Double
 pub fn Vector::equal(Self, Self) -> Bool

@@ -1,6 +1,6 @@
 # MoonHEALPix 架构与实现边界
 
-本文描述 `chenliyi-cly/moonhealpix@0.1.0` 当前源码与 [pkg.generated.mbti](../pkg.generated.mbti) 暴露的实现。项目采用 BSD-3-Clause，面向 `moonc >= 0.10.16`；本次核对工具链为 `moonc 0.10.18` / `moon 0.1.20261028`，日期为 2026-10-28。源码示例及验证目标为 `js` 和 `wasm-gc`，本文不声明远程 CI 或发布成功。
+本文描述 `chenliyi-cly/moonhealpix@0.1.0` 当前源码与 [pkg.generated.mbti](../pkg.generated.mbti) 暴露的实现。项目采用 BSD-3-Clause，面向 `moonc >= 0.10.20`；本次核对工具链为 `moonc 0.10.20` / `moon 0.1.20261104`。CI 覆盖 js、wasm、wasm-gc 和 native；执行状态以公开 Actions 日志为准。
 
 ## 1. 模块划分与数据流
 

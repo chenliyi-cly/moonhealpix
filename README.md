@@ -4,7 +4,7 @@ MoonHEALPix 是一个用 MoonBit 实现的 HEALPix 球面像素库，提供 RING
 
 - 模块：`chenliyi-cly/moonhealpix@0.1.0`
 - 项目仓库：[chenliyi-cly/moonhealpix](https://github.com/chenliyi-cly/moonhealpix)
-- 编译器要求：`moonc >= 0.10.16`。本次核对的工具链为 `moonc v0.10.18+6c83a7f62`、`moon 0.1.20261028`，日期均为 **2026-10-28**；最低版本要求不代表已逐一验证所有中间版本。
+- 编译器要求：`moonc >= 0.10.20`。本次验证工具链为 `moonc v0.10.20+65efd5b93`（2026-11-05）与 `moon 0.1.20261104`。比赛基线为不低于 0.10.16；本项目使用稳定版的 `#derive` 语法，因此安装时需使用 0.10.20 或更新版本。
 - 示例及验证命令使用 `js` 和 `wasm-gc` 目标；模块默认目标为 `wasm-gc`。
 - 许可证：BSD-3-Clause。
 
@@ -183,7 +183,7 @@ moon run examples/simulation --target wasm-gc
 
 ## 验证与当前状态
 
-本地使用 moonc 0.10.18 完成了严格检查及 wasm-gc、wasm、js 的构建、65 个测试和三个示例运行。Windows native 构建缺少 MSVC 与 Windows SDK；native 的运行验证由 Linux CI 执行，具体结果见仓库 Actions。
+本地使用 moonc 0.10.20 完成了严格检查及 wasm-gc、wasm、js 的构建、65 个测试和三个示例运行。Windows native 构建缺少 MSVC 与 Windows SDK；native 的运行验证由 Linux CI 执行，具体结果见仓库 Actions。
 
 独立离线 oracle 来自 `astropy-healpix 1.1.3`，数据保存在 [tests-data/oracle.json](tests-data/oracle.json)，转换为 [oracle_wbtest.mbt](oracle_wbtest.mbt) 中的静态测试：
 

@@ -1,10 +1,11 @@
 ///|
 /// One of twelve base faces and integer coordinates within that face.
+#derive(Eq, Debug)
 pub struct FaceXY {
   face : Int32
   x : Int32
   y : Int32
-} derive(Eq, Debug)
+}
 
 ///|
 pub extend FaceXY with Eq::{equal, not_equal}

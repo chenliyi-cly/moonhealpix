@@ -1,9 +1,10 @@
 ///|
 /// Radians; longitude is canonicalized to [0, 2*pi), latitude to [-pi/2, pi/2].
+#derive(Eq, Debug)
 pub struct LonLat {
   lon : Double
   lat : Double
-} derive(Eq, Debug)
+}
 
 ///|
 pub extend LonLat with Eq::{equal, not_equal}
@@ -13,11 +14,12 @@ pub extend LonLat with @debug.Debug::{to_repr}
 
 ///|
 /// Unit Cartesian vector. Construction rejects zero and nonfinite input.
+#derive(Eq, Debug)
 pub struct Vector {
   x : Double
   y : Double
   z : Double
-} derive(Eq, Debug)
+}
 
 ///|
 pub extend Vector with Eq::{equal, not_equal}

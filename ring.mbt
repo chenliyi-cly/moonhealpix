@@ -41,13 +41,14 @@ pub fn Grid::lonlat_to_ring(self : Grid, point : LonLat) -> Int32 {
 
 ///|
 /// A full latitude ring; start is its first RING pixel and count its length.
+#derive(Eq, Debug)
 pub struct RingInfo {
   number : Int32
   start : Int32
   count : Int32
   latitude : Double
   first_longitude : Double
-} derive(Eq, Debug)
+}
 
 ///|
 pub extend RingInfo with Eq::{equal, not_equal}

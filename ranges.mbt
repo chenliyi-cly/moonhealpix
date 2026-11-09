@@ -1,9 +1,10 @@
 ///|
 /// Half-open interval [start, end) in a single pixel ordering.
+#derive(Eq, Debug)
 pub struct PixelRange {
   start : Int32
   end : Int32
-} derive(Eq, Debug)
+}
 
 ///|
 pub extend PixelRange with Eq::{equal, not_equal}

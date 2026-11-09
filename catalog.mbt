@@ -108,10 +108,11 @@ pub fn Catalog::pixel_sources(
 }
 
 ///|
+#derive(Eq, Debug)
 pub struct SourceHit {
   index : Int32
   distance : Double
-} derive(Eq, Debug)
+}
 
 ///|
 pub extend SourceHit with Eq::{equal, not_equal}
