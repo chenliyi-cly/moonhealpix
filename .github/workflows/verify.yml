@@ -1,0 +1,41 @@
+name: Verify
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  moonbit:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [wasm-gc, wasm, js, native]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install official MoonBit stable toolchain
+        run: |
+          curl --fail --silent --show-error --location https://cli.moonbitlang.com/install/unix.sh --output /tmp/install-moon.sh
+          bash /tmp/install-moon.sh
+          echo "$HOME/.moon/bin" >> "$GITHUB_PATH"
+      - name: Verify compiler requirement
+        run: python3 tools/check_version.py
+      - name: Interface and format
+        run: |
+          moon info
+          moon fmt --check
+          python3 tools/oracle_to_moonbit.py --check
+      - name: Strict check
+        run: moon check --target ${{ matrix.target }} --deny-warn
+      - name: Build
+        run: moon build --target ${{ matrix.target }} --deny-warn
+      - name: Test
+        run: moon test --target ${{ matrix.target }} --deny-warn
+      - name: Complete workflows
+        run: |
+          moon run examples/catalog --target ${{ matrix.target }}
+          moon run examples/observations --target ${{ matrix.target }}
+          moon run examples/simulation --target ${{ matrix.target }}

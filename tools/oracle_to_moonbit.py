@@ -16,15 +16,13 @@ import argparse
 import hashlib
 import json
 import math
-import os
 import subprocess
 from collections import defaultdict
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 BATCH_SIZE = 64
-PINNED_MOONFMT = (Path.home() / ".codex" / "toolchains" / "moonrtsp-20261028"
-                  / "bin" / ("moonfmt.exe" if os.name == "nt" else "moonfmt"))
+
 
 
 def require(condition: bool, message: str) -> None:
@@ -157,8 +155,8 @@ def main() -> None:
     parser.add_argument("--input", type=Path, default=ROOT / "tests-data" / "oracle.json")
     parser.add_argument("--output", type=Path, default=ROOT / "oracle_wbtest.mbt")
     parser.add_argument("--check", action="store_true", help="Check output without writing")
-    parser.add_argument("--moonfmt", default=str(PINNED_MOONFMT) if PINNED_MOONFMT.is_file() else "moonfmt",
-                        help="Formatter executable (default: installed 20261028 toolchain, then PATH)")
+    parser.add_argument("--moonfmt", default="moonfmt",
+                        help="Formatter executable (default: moonfmt from PATH)")
     args = parser.parse_args()
     try:
         expected = formatted(render(args.input.read_bytes()), args.moonfmt)
