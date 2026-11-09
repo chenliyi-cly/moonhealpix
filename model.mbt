@@ -5,6 +5,7 @@ pub suberror HealpixError {
   InvalidOrder(Int32)
   InvalidAngle
   InvalidVector
+  InvalidFace
 } derive(Eq, Debug)
 
 ///|

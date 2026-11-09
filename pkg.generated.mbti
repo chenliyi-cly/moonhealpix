@@ -14,18 +14,31 @@ pub suberror HealpixError {
   InvalidOrder(Int32)
   InvalidAngle
   InvalidVector
+  InvalidFace
 } derive(Eq, @debug.Debug)
 pub fn HealpixError::equal(Self, Self) -> Bool
 pub fn HealpixError::not_equal(Self, Self) -> Bool
 pub fn HealpixError::to_repr(Self) -> @debug.Repr
 
 // Types and methods
+pub struct FaceXY {
+  face : Int32
+  x : Int32
+  y : Int32
+} derive(Eq, @debug.Debug)
+pub fn FaceXY::components(Self) -> (Int32, Int32, Int32)
+pub fn FaceXY::equal(Self, Self) -> Bool
+pub fn FaceXY::new(Grid, Int32, Int32, Int32) -> Self raise HealpixError
+pub fn FaceXY::not_equal(Self, Self) -> Bool
+pub fn FaceXY::to_repr(Self) -> @debug.Repr
+
 pub struct Grid {
   nside : Int32
   level : Int32
   npix : Int32
 } derive(Eq, @debug.Debug)
 pub fn Grid::equal(Self, Self) -> Bool
+pub fn Grid::face_pixel(Self, FaceXY) -> Int32 raise HealpixError
 pub fn Grid::from_level(Int32) -> Self raise HealpixError
 pub fn Grid::level(Self) -> Int32
 pub fn Grid::new(Int32) -> Self raise HealpixError
@@ -33,6 +46,7 @@ pub fn Grid::not_equal(Self, Self) -> Bool
 pub fn Grid::npix(Self) -> Int32
 pub fn Grid::nside(Self) -> Int32
 pub fn Grid::pixel_area(Self) -> Double
+pub fn Grid::pixel_face(Self, Int32) -> FaceXY raise HealpixError
 pub fn Grid::resolution(Self) -> Double
 pub fn Grid::to_repr(Self) -> @debug.Repr
 pub fn Grid::validate_pixel(Self, Int32) -> Unit raise HealpixError
