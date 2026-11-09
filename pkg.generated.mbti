@@ -144,6 +144,14 @@ pub fn PixelSet::ranges(Self) -> Array[PixelRange]
 pub fn PixelSet::reorder(Self, Ordering, Int32) -> Self raise HealpixError
 pub fn PixelSet::union(Self, Self) -> Self raise HealpixError
 
+pub(all) enum ResampleMode {
+  Mean
+  Sum
+} derive(Eq, @debug.Debug)
+pub fn ResampleMode::equal(Self, Self) -> Bool
+pub fn ResampleMode::not_equal(Self, Self) -> Bool
+pub fn ResampleMode::to_repr(Self) -> @debug.Repr
+
 pub struct RingInfo {
   number : Int32
   start : Int32
@@ -174,6 +182,7 @@ pub fn ScalarMap::masked(Self, PixelSet) -> Self raise HealpixError
 pub fn ScalarMap::new(Grid, Ordering, Array[Double?], Int32) -> Self raise HealpixError
 pub fn ScalarMap::ordering(Self) -> Ordering
 pub fn ScalarMap::reorder(Self, Ordering) -> Self raise HealpixError
+pub fn ScalarMap::resample(Self, Grid, ResampleMode, Int32) -> Self raise HealpixError
 pub fn ScalarMap::sample(Self, LonLat) -> Double? raise HealpixError
 pub fn ScalarMap::summary(Self) -> Summary? raise HealpixError
 pub fn ScalarMap::values(Self) -> Array[Double?]
