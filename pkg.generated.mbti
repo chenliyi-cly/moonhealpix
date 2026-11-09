@@ -79,6 +79,7 @@ pub fn Grid::nside(Self) -> Int32
 pub fn Grid::pixel_area(Self) -> Double
 pub fn Grid::pixel_face(Self, Int32) -> FaceXY raise HealpixError
 pub fn Grid::pixel_ring(Self, Int32) -> RingInfo raise HealpixError
+pub fn Grid::query_box(Self, LonLatBox, Int32, Int32) -> PixelSet raise HealpixError
 pub fn Grid::query_disc(Self, LonLat, Double, Int32, Int32) -> PixelSet raise HealpixError
 pub fn Grid::resolution(Self) -> Double
 pub fn Grid::ring_center(Self, Int32) -> LonLat raise HealpixError
@@ -104,6 +105,16 @@ pub fn LonLat::not_equal(Self, Self) -> Bool
 pub fn LonLat::separation(Self, Self) -> Double
 pub fn LonLat::to_repr(Self) -> @debug.Repr
 pub fn LonLat::vector(Self) -> Vector
+
+pub struct LonLatBox {
+  west : Double
+  width : Double
+  south : Double
+  north : Double
+}
+pub fn LonLatBox::contains(Self, LonLat) -> Bool
+pub fn LonLatBox::degrees(Double, Double, Double, Double) -> Self raise HealpixError
+pub fn LonLatBox::new(Double, Double, Double, Double) -> Self raise HealpixError
 
 pub(all) enum Ordering {
   Ring
