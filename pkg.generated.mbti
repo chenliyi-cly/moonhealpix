@@ -18,6 +18,7 @@ pub suberror HealpixError {
   InvalidRange
   ResourceLimit
   IncompatibleGrid
+  InvalidData
 } derive(Eq, @debug.Debug)
 pub fn HealpixError::equal(Self, Self) -> Bool
 pub fn HealpixError::not_equal(Self, Self) -> Bool
@@ -159,6 +160,41 @@ pub fn RingInfo::not_equal(Self, Self) -> Bool
 pub fn RingInfo::number(Self) -> Int32
 pub fn RingInfo::start(Self) -> Int32
 pub fn RingInfo::to_repr(Self) -> @debug.Repr
+
+pub struct ScalarMap {
+  grid : Grid
+  ordering : Ordering
+  data : Array[Double?]
+}
+pub fn ScalarMap::filled(Grid, Ordering, Double?, Int32) -> Self raise HealpixError
+pub fn ScalarMap::get(Self, Int32) -> Double? raise HealpixError
+pub fn ScalarMap::grid(Self) -> Grid
+pub fn ScalarMap::new(Grid, Ordering, Array[Double?], Int32) -> Self raise HealpixError
+pub fn ScalarMap::ordering(Self) -> Ordering
+pub fn ScalarMap::sample(Self, LonLat) -> Double? raise HealpixError
+pub fn ScalarMap::summary(Self) -> Summary? raise HealpixError
+pub fn ScalarMap::values(Self) -> Array[Double?]
+pub fn ScalarMap::with_value(Self, Int32, Double?) -> Self raise HealpixError
+
+pub struct Summary {
+  count : Int32
+  missing : Int32
+  sum : Double
+  mean : Double
+  variance : Double
+  minimum : Double
+  maximum : Double
+} derive(Eq, @debug.Debug)
+pub fn Summary::count(Self) -> Int32
+pub fn Summary::equal(Self, Self) -> Bool
+pub fn Summary::maximum(Self) -> Double
+pub fn Summary::mean(Self) -> Double
+pub fn Summary::minimum(Self) -> Double
+pub fn Summary::missing(Self) -> Int32
+pub fn Summary::not_equal(Self, Self) -> Bool
+pub fn Summary::sum(Self) -> Double
+pub fn Summary::to_repr(Self) -> @debug.Repr
+pub fn Summary::variance(Self) -> Double
 
 pub struct Vector {
   x : Double

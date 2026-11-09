@@ -9,6 +9,7 @@ pub suberror HealpixError {
   InvalidRange
   ResourceLimit
   IncompatibleGrid
+  InvalidData
 } derive(Eq, Debug)
 
 ///|
