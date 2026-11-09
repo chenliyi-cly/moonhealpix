@@ -25,6 +25,23 @@ pub fn HealpixError::not_equal(Self, Self) -> Bool
 pub fn HealpixError::to_repr(Self) -> @debug.Repr
 
 // Types and methods
+pub struct Catalog {
+  grid : Grid
+  sources : Array[LonLat]
+  indices : Array[(Int32, Int32)]
+  bins : Array[CatalogBin]
+}
+pub fn Catalog::count_map(Self, Int32) -> ScalarMap raise HealpixError
+pub fn Catalog::grid(Self) -> Grid
+pub fn Catalog::length(Self) -> Int32
+pub fn Catalog::new(Grid, Array[LonLat], Int32) -> Self raise HealpixError
+pub fn Catalog::occupied_pixels(Self) -> Int32
+pub fn Catalog::pixel_sources(Self, Int32, Int32) -> Array[Int32] raise HealpixError
+pub fn Catalog::query_cone(Self, LonLat, Double, Int32, Int32) -> Array[SourceHit] raise HealpixError
+pub fn Catalog::source(Self, Int32) -> LonLat raise HealpixError
+
+type CatalogBin
+
 pub struct Cell {
   grid : Grid
   pixel : Int32
@@ -201,6 +218,16 @@ pub fn ScalarMap::sample(Self, LonLat) -> Double? raise HealpixError
 pub fn ScalarMap::summary(Self) -> Summary? raise HealpixError
 pub fn ScalarMap::values(Self) -> Array[Double?]
 pub fn ScalarMap::with_value(Self, Int32, Double?) -> Self raise HealpixError
+
+pub struct SourceHit {
+  index : Int32
+  distance : Double
+} derive(Eq, @debug.Debug)
+pub fn SourceHit::distance(Self) -> Double
+pub fn SourceHit::equal(Self, Self) -> Bool
+pub fn SourceHit::index(Self) -> Int32
+pub fn SourceHit::not_equal(Self, Self) -> Bool
+pub fn SourceHit::to_repr(Self) -> @debug.Repr
 
 pub struct Summary {
   count : Int32
