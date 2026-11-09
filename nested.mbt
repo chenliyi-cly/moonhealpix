@@ -40,3 +40,35 @@ pub fn Grid::vector_to_nested(
 ) -> Int32 raise HealpixError {
   self.lonlat_to_nested(vector.lonlat())
 }
+
+///|
+/// Continuous HEALPix face projection; coordinates run from 0 to nside.
+fn face_lonlat(grid : Grid, face : Int32, x : Double, y : Double) -> LonLat {
+  let jrll = [2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4]
+  let jpll = [1, 3, 5, 7, 0, 2, 4, 6, 1, 3, 5, 7]
+  let n = grid.nside.to_double()
+  let jr = jrll[face].to_double() * n - x - y
+  let (nr, z) = if jr < n {
+    (jr, 1.0 - jr * jr / (3.0 * n * n))
+  } else if jr > 3.0 * n {
+    let r = 4.0 * n - jr
+    (r, -1.0 + r * r / (3.0 * n * n))
+  } else {
+    (n, (2.0 * n - jr) * (2.0 / (3.0 * n)))
+  }
+  let lon = if nr <= 0.0 {
+    jpll[face].to_double() * @math.PI / 4.0
+  } else {
+    (jpll[face].to_double() * nr + x - y) * @math.PI / (4.0 * nr)
+  }
+  { lon: wrap_longitude(lon), lat: @math.asin(clamp(z, -1.0, 1.0)), }
+}
+
+///|
+pub fn Grid::nested_center(
+  self : Grid,
+  pixel : Int32,
+) -> LonLat raise HealpixError {
+  let c = self.pixel_face(pixel)
+  face_lonlat(self, c.face, c.x.to_double() + 0.5, c.y.to_double() + 0.5)
+}
