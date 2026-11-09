@@ -1,0 +1,5 @@
+import {
+  "chenliyi-cly/moonhealpix" @hp,
+}
+
+pkgtype(kind: "executable")

@@ -1,0 +1,6 @@
+import {
+  "chenliyi-cly/moonhealpix" @hp,
+  "moonbitlang/core/math",
+}
+
+pkgtype(kind: "executable")
