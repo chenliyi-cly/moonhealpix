@@ -14,22 +14,34 @@ test "workflow catalog seam selection to weighted observation maps" {
     LonLat::degrees(0.0, 80.0),
   ]
   let values : Array[Double?] = [
-    Some(2.0), Some(4.0), Some(8.0), Some(1000.0), Some(999.0), None,
+    Some(2.0),
+    Some(4.0),
+    Some(8.0),
+    Some(1000.0),
+    Some(999.0),
+    None,
   ]
   let weights = [1.0, 1.0, 3.0, 1.0, 1.0, 1.0]
   let catalog = Catalog::new(grid, sources, 6)
   let hits = catalog.query_cone(
-    LonLat::degrees(0.0, 0.0), 0.5 * @math.PI / 180.0, 3, 12,
+    LonLat::degrees(0.0, 0.0),
+    0.5 * @math.PI / 180.0,
+    3,
+    12,
   )
   // On the equator the short longitude differences are 0.1, 0.1, 0.2 deg.
   // Duplicate positions retain both source identifiers, in input-index order.
   assert_eq(hits.map(hit => hit.index()), [1, 2, 0])
   for i = 0; i < 3; i = i + 1 {
     let degrees = if i < 2 { 0.1 } else { 0.2 }
-    assert_true((hits[i].distance() - degrees * @math.PI / 180.0).abs() < 1.0e-14)
+    assert_true(
+      (hits[i].distance() - degrees * @math.PI / 180.0).abs() < 1.0e-14,
+    )
   }
   let selected = Catalog::new(
-    grid, hits.map(hit => catalog.source(hit.index())), 3,
+    grid,
+    hits.map(hit => catalog.source(hit.index())),
+    3,
   )
   let stats = selected.bin_values(
     hits.map(hit => values[hit.index()]),
@@ -105,13 +117,15 @@ test "workflow scalar flux resampling preserves totals and missing semantics" {
   assert_eq(expanded_flux.summary().unwrap().missing(), 2880)
   // A caller's insufficient output budget yields the typed error; retrying
   // with the correct budget must not have mutated the source map.
-  assert_true(try {
-    flux.resample(high, Sum, 3071) |> ignore
-    false
-  } catch {
-    ResourceLimit => true
-    _ => false
-  })
+  assert_true(
+    try {
+      flux.resample(high, Sum, 3071) |> ignore
+      false
+    } catch {
+      ResourceLimit => true
+      _ => false
+    },
+  )
   assert_eq(flux.summary().unwrap().sum(), 16.0)
   assert_eq(input.summary().unwrap().sum(), 16.0)
   assert_eq(input.summary().unwrap().count(), 5)
@@ -125,17 +139,19 @@ test "workflow mixed hierarchy coverage to maximum-level range algebra" {
   // A level-0 face spans 67,108,864 leaves, and a level-1 cell 16,777,216.
   // Survey A covers cell 4 at level 1 and face 11. The redundant finer
   // cell and duplicate face represent overlapping input survey tiles.
-  let a = grid.cover_cells([
-    Cell::new(root, 11),
-    Cell::new(level1, 4),
-    Cell::new(Grid::new(4), 17),
-    Cell::new(root, 11),
-  ], 4)
-  let b = grid.cover_cells([
-    Cell::new(level1, 5),
-    Cell::new(level1, 45),
-    Cell::new(grid, 805306367),
-  ], 3)
+  let a = grid.cover_cells(
+    [
+      Cell::new(root, 11),
+      Cell::new(level1, 4),
+      Cell::new(Grid::new(4), 17),
+      Cell::new(root, 11),
+    ],
+    4,
+  )
+  let b = grid.cover_cells(
+    [Cell::new(level1, 5), Cell::new(level1, 45), Cell::new(grid, 805306367)],
+    3,
+  )
   assert_eq(a.ranges(), [
     PixelRange::new(grid, 67108864, 83886080),
     PixelRange::new(grid, 738197504, 805306368),
@@ -161,15 +177,17 @@ test "workflow mixed hierarchy coverage to maximum-level range algebra" {
   ])
   // Explicit interval membership is independent of hierarchy expansion.
   // Witness both sides of every boundary, including the final valid leaf.
-  for pixel in [
-    -1, 0, 67108863, 67108864, 83886079, 83886080, 100663295,
-    100663296, 738197503, 738197504, 754974719, 754974720,
-    771751935, 771751936, 805306366, 805306367, 805306368,
-  ] {
+  for
+    pixel in [
+      -1, 0, 67108863, 67108864, 83886079, 83886080, 100663295, 100663296, 738197503,
+      738197504, 754974719, 754974720, 771751935, 771751936, 805306366, 805306367,
+      805306368,
+    ] {
     let in_a = (pixel >= 67108864 && pixel < 83886080) ||
       (pixel >= 738197504 && pixel < 805306368)
     let in_b = (pixel >= 83886080 && pixel < 100663296) ||
-      (pixel >= 754974720 && pixel < 771751936) || pixel == 805306367
+      (pixel >= 754974720 && pixel < 771751936) ||
+      pixel == 805306367
     assert_eq(a.contains(pixel), in_a)
     assert_eq(b.contains(pixel), in_b)
     assert_eq(union.contains(pixel), in_a || in_b)
@@ -185,13 +203,16 @@ test "workflow mixed hierarchy coverage to maximum-level range algebra" {
   // 83 million leaves or relying solely on a compact/expand round trip.
   assert_eq(a.compact_cells(2).map(cell => cell.uniq()), [20, 15])
   assert_eq(a.at_level(1).ranges(), [
-    PixelRange::new(level1, 4, 5), PixelRange::new(level1, 44, 48),
+    PixelRange::new(level1, 4, 5),
+    PixelRange::new(level1, 44, 48),
   ])
-  assert_true(try {
-    a.pixels(1000) |> ignore
-    false
-  } catch {
-    ResourceLimit => true
-    _ => false
-  })
+  assert_true(
+    try {
+      a.pixels(1000) |> ignore
+      false
+    } catch {
+      ResourceLimit => true
+      _ => false
+    },
+  )
 }
