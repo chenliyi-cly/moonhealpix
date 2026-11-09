@@ -12,6 +12,8 @@ pub suberror HealpixError {
   InvalidNside(Int32)
   InvalidPixel(Int32)
   InvalidOrder(Int32)
+  InvalidAngle
+  InvalidVector
 } derive(Eq, @debug.Debug)
 pub fn HealpixError::equal(Self, Self) -> Bool
 pub fn HealpixError::not_equal(Self, Self) -> Bool
@@ -34,6 +36,36 @@ pub fn Grid::pixel_area(Self) -> Double
 pub fn Grid::resolution(Self) -> Double
 pub fn Grid::to_repr(Self) -> @debug.Repr
 pub fn Grid::validate_pixel(Self, Int32) -> Unit raise HealpixError
+
+pub struct LonLat {
+  lon : Double
+  lat : Double
+} derive(Eq, @debug.Debug)
+pub fn LonLat::degrees(Double, Double) -> Self raise HealpixError
+pub fn LonLat::equal(Self, Self) -> Bool
+pub fn LonLat::latitude(Self) -> Double
+pub fn LonLat::latitude_degrees(Self) -> Double
+pub fn LonLat::longitude(Self) -> Double
+pub fn LonLat::longitude_degrees(Self) -> Double
+pub fn LonLat::new(Double, Double) -> Self raise HealpixError
+pub fn LonLat::not_equal(Self, Self) -> Bool
+pub fn LonLat::separation(Self, Self) -> Double
+pub fn LonLat::to_repr(Self) -> @debug.Repr
+pub fn LonLat::vector(Self) -> Vector
+
+pub struct Vector {
+  x : Double
+  y : Double
+  z : Double
+} derive(Eq, @debug.Debug)
+pub fn Vector::components(Self) -> (Double, Double, Double)
+pub fn Vector::dot(Self, Self) -> Double
+pub fn Vector::equal(Self, Self) -> Bool
+pub fn Vector::lonlat(Self) -> LonLat
+pub fn Vector::new(Double, Double, Double) -> Self raise HealpixError
+pub fn Vector::not_equal(Self, Self) -> Bool
+pub fn Vector::separation(Self, Self) -> Double
+pub fn Vector::to_repr(Self) -> @debug.Repr
 
 // Type aliases
 

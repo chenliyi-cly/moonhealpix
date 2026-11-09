@@ -3,6 +3,8 @@ pub suberror HealpixError {
   InvalidNside(Int32)
   InvalidPixel(Int32)
   InvalidOrder(Int32)
+  InvalidAngle
+  InvalidVector
 } derive(Eq, Debug)
 
 ///|
