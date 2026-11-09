@@ -15,6 +15,7 @@ pub suberror HealpixError {
   InvalidAngle
   InvalidVector
   InvalidFace
+  InvalidRange
 } derive(Eq, @debug.Debug)
 pub fn HealpixError::equal(Self, Self) -> Bool
 pub fn HealpixError::not_equal(Self, Self) -> Bool
@@ -50,7 +51,11 @@ pub fn Grid::npix(Self) -> Int32
 pub fn Grid::nside(Self) -> Int32
 pub fn Grid::pixel_area(Self) -> Double
 pub fn Grid::pixel_face(Self, Int32) -> FaceXY raise HealpixError
+pub fn Grid::pixel_ring(Self, Int32) -> RingInfo raise HealpixError
 pub fn Grid::resolution(Self) -> Double
+pub fn Grid::ring_center(Self, Int32) -> LonLat raise HealpixError
+pub fn Grid::ring_count(Self) -> Int32
+pub fn Grid::ring_info(Self, Int32) -> RingInfo raise HealpixError
 pub fn Grid::to_repr(Self) -> @debug.Repr
 pub fn Grid::validate_pixel(Self, Int32) -> Unit raise HealpixError
 pub fn Grid::vector_to_nested(Self, Vector) -> Int32 raise HealpixError
@@ -70,6 +75,23 @@ pub fn LonLat::not_equal(Self, Self) -> Bool
 pub fn LonLat::separation(Self, Self) -> Double
 pub fn LonLat::to_repr(Self) -> @debug.Repr
 pub fn LonLat::vector(Self) -> Vector
+
+pub struct RingInfo {
+  number : Int32
+  start : Int32
+  count : Int32
+  latitude : Double
+  first_longitude : Double
+} derive(Eq, @debug.Debug)
+pub fn RingInfo::count(Self) -> Int32
+pub fn RingInfo::equal(Self, Self) -> Bool
+pub fn RingInfo::first_longitude(Self) -> Double
+pub fn RingInfo::latitude(Self) -> Double
+pub fn RingInfo::longitude_step(Self) -> Double
+pub fn RingInfo::not_equal(Self, Self) -> Bool
+pub fn RingInfo::number(Self) -> Int32
+pub fn RingInfo::start(Self) -> Int32
+pub fn RingInfo::to_repr(Self) -> @debug.Repr
 
 pub struct Vector {
   x : Double

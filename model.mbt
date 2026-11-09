@@ -6,6 +6,7 @@ pub suberror HealpixError {
   InvalidAngle
   InvalidVector
   InvalidFace
+  InvalidRange
 } derive(Eq, Debug)
 
 ///|
