@@ -166,11 +166,14 @@ pub struct ScalarMap {
   ordering : Ordering
   data : Array[Double?]
 }
+pub fn ScalarMap::coalesce(Self, Self) -> Self raise HealpixError
 pub fn ScalarMap::filled(Grid, Ordering, Double?, Int32) -> Self raise HealpixError
 pub fn ScalarMap::get(Self, Int32) -> Double? raise HealpixError
 pub fn ScalarMap::grid(Self) -> Grid
+pub fn ScalarMap::masked(Self, PixelSet) -> Self raise HealpixError
 pub fn ScalarMap::new(Grid, Ordering, Array[Double?], Int32) -> Self raise HealpixError
 pub fn ScalarMap::ordering(Self) -> Ordering
+pub fn ScalarMap::reorder(Self, Ordering) -> Self raise HealpixError
 pub fn ScalarMap::sample(Self, LonLat) -> Double? raise HealpixError
 pub fn ScalarMap::summary(Self) -> Summary? raise HealpixError
 pub fn ScalarMap::values(Self) -> Array[Double?]
