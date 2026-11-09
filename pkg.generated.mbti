@@ -38,13 +38,17 @@ pub struct Grid {
   level : Int32
   npix : Int32
 } derive(Eq, @debug.Debug)
+pub fn Grid::center(Self, Int32, Ordering) -> LonLat raise HealpixError
+pub fn Grid::convert(Self, Int32, Ordering, Ordering) -> Int32 raise HealpixError
 pub fn Grid::equal(Self, Self) -> Bool
 pub fn Grid::face_pixel(Self, FaceXY) -> Int32 raise HealpixError
 pub fn Grid::from_level(Int32) -> Self raise HealpixError
+pub fn Grid::index(Self, LonLat, Ordering) -> Int32 raise HealpixError
 pub fn Grid::level(Self) -> Int32
 pub fn Grid::lonlat_to_nested(Self, LonLat) -> Int32 raise HealpixError
 pub fn Grid::lonlat_to_ring(Self, LonLat) -> Int32
 pub fn Grid::nested_center(Self, Int32) -> LonLat raise HealpixError
+pub fn Grid::nested_to_ring(Self, Int32) -> Int32 raise HealpixError
 pub fn Grid::new(Int32) -> Self raise HealpixError
 pub fn Grid::not_equal(Self, Self) -> Bool
 pub fn Grid::npix(Self) -> Int32
@@ -56,6 +60,7 @@ pub fn Grid::resolution(Self) -> Double
 pub fn Grid::ring_center(Self, Int32) -> LonLat raise HealpixError
 pub fn Grid::ring_count(Self) -> Int32
 pub fn Grid::ring_info(Self, Int32) -> RingInfo raise HealpixError
+pub fn Grid::ring_to_nested(Self, Int32) -> Int32 raise HealpixError
 pub fn Grid::to_repr(Self) -> @debug.Repr
 pub fn Grid::validate_pixel(Self, Int32) -> Unit raise HealpixError
 pub fn Grid::vector_to_nested(Self, Vector) -> Int32 raise HealpixError
@@ -75,6 +80,14 @@ pub fn LonLat::not_equal(Self, Self) -> Bool
 pub fn LonLat::separation(Self, Self) -> Double
 pub fn LonLat::to_repr(Self) -> @debug.Repr
 pub fn LonLat::vector(Self) -> Vector
+
+pub(all) enum Ordering {
+  Ring
+  Nested
+} derive(Eq, @debug.Debug)
+pub fn Ordering::equal(Self, Self) -> Bool
+pub fn Ordering::not_equal(Self, Self) -> Bool
+pub fn Ordering::to_repr(Self) -> @debug.Repr
 
 pub struct RingInfo {
   number : Int32
