@@ -54,3 +54,9 @@
 使用固定 astropy-healpix 1.1.3 独立计算的向量验证索引、中心、排序与层级；用独立几何暴力真值复核区域查询；各后端验证算法不变量、错误和三个实际下游流程。参考资料及 BSD 声明保存在 THIRD_PARTY.md 和 licenses/。
 
 检索局限如上。结论仅为：**在已记录检索范围内未发现成熟直接替代**。发布前重查核心行为词及注册表，并记录日期和差异。
+
+## 发布前复查（2026-11-09）
+
+在完整实现之后重新执行 `moon search healpix/pix2ang/nested_to_ring --limit 100`、GitHub MoonBit 源码搜索 HEALPix/pix2ang/nested_to_ring，以及永久注册表能力检索。前两个 Moon 搜索无结果；nested_to_ring 的模糊结果为 totto2727/x、Juwan-Hwang/moon-certified、bobzhang/games、gmlewis/step、prowk/mooncql。额外读取这五个精确版本的公开 manifest 和仓库 README，分别是工具集合、通用算法、游戏、STEP 建模和 Cassandra 驱动；未据模糊搜索的命中本身判定重复。没有声称完整审阅这五个项目的所有源码和测试。GitHub 精确行为搜索仍无 pix2ang/nested_to_ring 实现命中；HEALPix 两处仍是此前核对过的 grib2 标签。注册表仅有本项目预留记录与已记录近邻，没有新直接候选。
+
+本次复查公开输出保存在仓库外验收证据目录；不覆盖私有、未发布和未索引代码。最终结论仍限于：**在已记录检索范围内未发现成熟直接替代**。
