@@ -25,12 +25,26 @@ pub fn HealpixError::not_equal(Self, Self) -> Bool
 pub fn HealpixError::to_repr(Self) -> @debug.Repr
 
 // Types and methods
+pub struct BinnedStats {
+  counts : ScalarMap
+  weights : ScalarMap
+  sums : ScalarMap
+  means : ScalarMap
+  variances : ScalarMap
+}
+pub fn BinnedStats::counts(Self) -> ScalarMap
+pub fn BinnedStats::means(Self) -> ScalarMap
+pub fn BinnedStats::sums(Self) -> ScalarMap
+pub fn BinnedStats::variances(Self) -> ScalarMap
+pub fn BinnedStats::weights(Self) -> ScalarMap
+
 pub struct Catalog {
   grid : Grid
   sources : Array[LonLat]
   indices : Array[(Int32, Int32)]
   bins : Array[CatalogBin]
 }
+pub fn Catalog::bin_values(Self, Array[Double?], Array[Double], Int32) -> BinnedStats raise HealpixError
 pub fn Catalog::count_map(Self, Int32) -> ScalarMap raise HealpixError
 pub fn Catalog::grid(Self) -> Grid
 pub fn Catalog::length(Self) -> Int32
