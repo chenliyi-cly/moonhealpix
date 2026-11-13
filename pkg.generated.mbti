@@ -44,6 +44,7 @@ pub struct Catalog {
   sources : Array[LonLat]
   indices : Array[(Int32, Int32)]
   bins : Array[CatalogBin]
+  tree : Array[CatalogNode]
 }
 pub fn Catalog::bin_values(Self, Array[Double?], Array[Double], Int32) -> BinnedStats raise HealpixError
 pub fn Catalog::count_map(Self, Int32) -> ScalarMap raise HealpixError
@@ -53,9 +54,21 @@ pub fn Catalog::new(Grid, Array[LonLat], Int32) -> Self raise HealpixError
 pub fn Catalog::occupied_pixels(Self) -> Int32
 pub fn Catalog::pixel_sources(Self, Int32, Int32) -> Array[Int32] raise HealpixError
 pub fn Catalog::query_cone(Self, LonLat, Double, Int32, Int32) -> Array[SourceHit] raise HealpixError
+pub fn Catalog::search_cone(Self, LonLat, Double, Int32, Int32) -> CatalogSearch raise HealpixError
 pub fn Catalog::source(Self, Int32) -> LonLat raise HealpixError
 
 type CatalogBin
+
+type CatalogNode
+
+pub struct CatalogSearch {
+  hits : Array[SourceHit]
+  visited_nodes : Int32
+  tested_sources : Int32
+}
+pub fn CatalogSearch::hits(Self) -> Array[SourceHit]
+pub fn CatalogSearch::tested_sources(Self) -> Int32
+pub fn CatalogSearch::visited_nodes(Self) -> Int32
 
 #derive(Eq, @debug.Debug)
 pub struct Cell {
@@ -64,6 +77,7 @@ pub struct Cell {
 }
 pub fn Cell::area(Self) -> Double
 pub fn Cell::boundary(Self, Int32, Int32) -> Array[LonLat] raise HealpixError
+pub fn Cell::bounding_radius(Self) -> Double raise HealpixError
 pub fn Cell::center(Self) -> LonLat raise HealpixError
 pub fn Cell::children(Self, Int32, Int32) -> Array[Self] raise HealpixError
 pub fn Cell::contains(Self, Self) -> Bool
@@ -96,9 +110,12 @@ pub struct Grid {
   level : Int32
   npix : Int32
 }
+pub fn Grid::bilinear_interpolation_weights(Self, LonLat, Ordering) -> (Array[Int32], Array[Double]) raise HealpixError
 pub fn Grid::center(Self, Int32, Ordering) -> LonLat raise HealpixError
 pub fn Grid::convert(Self, Int32, Ordering, Ordering) -> Int32 raise HealpixError
 pub fn Grid::cover_cells(Self, Array[Cell], Int32) -> PixelSet raise HealpixError
+pub fn Grid::cover_disc(Self, LonLat, Double, Int32, Int32, Int32) -> RegionCover raise HealpixError
+pub fn Grid::cover_polygon(Self, SphericalPolygon, Int32, Int32, Int32) -> RegionCover raise HealpixError
 pub fn Grid::equal(Self, Self) -> Bool
 pub fn Grid::face_pixel(Self, FaceXY) -> Int32 raise HealpixError
 pub fn Grid::from_level(Int32) -> Self raise HealpixError
@@ -106,6 +123,7 @@ pub fn Grid::index(Self, LonLat, Ordering) -> Int32 raise HealpixError
 pub fn Grid::level(Self) -> Int32
 pub fn Grid::lonlat_to_nested(Self, LonLat) -> Int32 raise HealpixError
 pub fn Grid::lonlat_to_ring(Self, LonLat) -> Int32
+pub fn Grid::neighbours(Self, Int32, Ordering) -> Array[Int32] raise HealpixError
 pub fn Grid::nested_center(Self, Int32) -> LonLat raise HealpixError
 pub fn Grid::nested_to_ring(Self, Int32) -> Int32 raise HealpixError
 pub fn Grid::new(Int32) -> Self raise HealpixError
@@ -118,11 +136,14 @@ pub fn Grid::pixel_position(Self, Int32, Double, Double) -> LonLat raise Healpix
 pub fn Grid::pixel_ring(Self, Int32) -> RingInfo raise HealpixError
 pub fn Grid::query_box(Self, LonLatBox, Int32, Int32) -> PixelSet raise HealpixError
 pub fn Grid::query_disc(Self, LonLat, Double, Int32, Int32) -> PixelSet raise HealpixError
+pub fn Grid::query_polygon(Self, SphericalPolygon, Int32, Int32) -> PixelSet raise HealpixError
 pub fn Grid::resolution(Self) -> Double
 pub fn Grid::ring_center(Self, Int32) -> LonLat raise HealpixError
 pub fn Grid::ring_count(Self) -> Int32
 pub fn Grid::ring_info(Self, Int32) -> RingInfo raise HealpixError
 pub fn Grid::ring_to_nested(Self, Int32) -> Int32 raise HealpixError
+pub fn Grid::search_disc(Self, LonLat, Double, Int32, Int32) -> PixelSearch raise HealpixError
+pub fn Grid::search_polygon(Self, SphericalPolygon, Int32, Int32) -> PixelSearch raise HealpixError
 pub fn Grid::to_repr(Self) -> @debug.Repr
 pub fn Grid::validate_pixel(Self, Int32) -> Unit raise HealpixError
 pub fn Grid::vector_to_nested(Self, Vector) -> Int32 raise HealpixError
@@ -154,6 +175,33 @@ pub fn LonLatBox::contains(Self, LonLat) -> Bool
 pub fn LonLatBox::degrees(Double, Double, Double, Double) -> Self raise HealpixError
 pub fn LonLatBox::new(Double, Double, Double, Double) -> Self raise HealpixError
 
+type Moc
+pub fn Moc::cells(Self, MocLimits) -> Array[Cell] raise HealpixError
+pub fn Moc::complement(Self, MocLimits) -> Self raise HealpixError
+pub fn Moc::difference(Self, Self, MocLimits) -> Self raise HealpixError
+pub fn Moc::empty(Int32) -> Self raise HealpixError
+pub fn Moc::equals(Self, Self) -> Bool
+pub fn Moc::from_ascii(String, MocLimits) -> Self raise HealpixError
+pub fn Moc::from_cells(Array[Cell], Int32, MocLimits) -> Self raise HealpixError
+pub fn Moc::from_json(String, MocLimits) -> Self raise HealpixError
+pub fn Moc::from_pixel_set(PixelSet, Int32, MocLimits) -> Self raise HealpixError
+pub fn Moc::from_uniq(Array[Int32], Int32, MocLimits) -> Self raise HealpixError
+pub fn Moc::intersection(Self, Self, MocLimits) -> Self raise HealpixError
+pub fn Moc::max_order(Self) -> Int32
+pub fn Moc::pixel_set(Self) -> PixelSet raise HealpixError
+pub fn Moc::to_ascii(Self, MocLimits) -> String raise HealpixError
+pub fn Moc::to_json(Self, MocLimits) -> String raise HealpixError
+pub fn Moc::union(Self, Self, MocLimits) -> Self raise HealpixError
+pub fn Moc::uniq(Self, MocLimits) -> Array[Int32] raise HealpixError
+
+pub struct MocLimits {
+  max_ranges : Int32
+  max_cells : Int32
+  max_chars : Int32
+}
+pub fn MocLimits::default() -> Self
+pub fn MocLimits::new(Int32, Int32, Int32) -> Self raise HealpixError
+
 #derive(Eq, @debug.Debug)
 pub(all) enum Ordering {
   Ring
@@ -176,6 +224,13 @@ pub fn PixelRange::not_equal(Self, Self) -> Bool
 pub fn PixelRange::start(Self) -> Int32
 pub fn PixelRange::to_repr(Self) -> @debug.Repr
 
+pub struct PixelSearch {
+  pixels : PixelSet
+  visited : Int32
+}
+pub fn PixelSearch::pixels(Self) -> PixelSet
+pub fn PixelSearch::visited(Self) -> Int32
+
 pub struct PixelSet {
   grid : Grid
   ordering : Ordering
@@ -195,6 +250,18 @@ pub fn PixelSet::pixels(Self, Int32) -> Array[Int32] raise HealpixError
 pub fn PixelSet::ranges(Self) -> Array[PixelRange]
 pub fn PixelSet::reorder(Self, Ordering, Int32) -> Self raise HealpixError
 pub fn PixelSet::union(Self, Self) -> Self raise HealpixError
+
+pub struct RegionCover {
+  pixels : PixelSet
+  interior : PixelSet
+  visited : Int32
+  refinement_level : Int32
+}
+pub fn RegionCover::boundary(Self) -> PixelSet raise HealpixError
+pub fn RegionCover::interior(Self) -> PixelSet
+pub fn RegionCover::pixels(Self) -> PixelSet
+pub fn RegionCover::refinement_level(Self) -> Int32
+pub fn RegionCover::visited(Self) -> Int32
 
 #derive(Eq, @debug.Debug)
 pub(all) enum ResampleMode {
@@ -232,6 +299,7 @@ pub fn ScalarMap::coalesce(Self, Self) -> Self raise HealpixError
 pub fn ScalarMap::filled(Grid, Ordering, Double?, Int32) -> Self raise HealpixError
 pub fn ScalarMap::get(Self, Int32) -> Double? raise HealpixError
 pub fn ScalarMap::grid(Self) -> Grid
+pub fn ScalarMap::interpolate_bilinear(Self, LonLat) -> Double? raise HealpixError
 pub fn ScalarMap::masked(Self, PixelSet) -> Self raise HealpixError
 pub fn ScalarMap::new(Grid, Ordering, Array[Double?], Int32) -> Self raise HealpixError
 pub fn ScalarMap::ordering(Self) -> Ordering
@@ -252,6 +320,14 @@ pub fn SourceHit::equal(Self, Self) -> Bool
 pub fn SourceHit::index(Self) -> Int32
 pub fn SourceHit::not_equal(Self, Self) -> Bool
 pub fn SourceHit::to_repr(Self) -> @debug.Repr
+
+pub struct SphericalPolygon {
+  vertices : Array[Vector]
+  normals : Array[Vector]
+}
+pub fn SphericalPolygon::contains(Self, LonLat) -> Bool
+pub fn SphericalPolygon::new(Array[LonLat], Int32) -> Self raise HealpixError
+pub fn SphericalPolygon::vertices(Self) -> Array[LonLat]
 
 #derive(Eq, @debug.Debug)
 pub struct Summary {

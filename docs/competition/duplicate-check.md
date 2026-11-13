@@ -60,3 +60,27 @@
 在完整实现之后重新执行 `moon search healpix/pix2ang/nested_to_ring --limit 100`、GitHub MoonBit 源码搜索 HEALPix/pix2ang/nested_to_ring，以及永久注册表能力检索。前两个 Moon 搜索无结果；nested_to_ring 的模糊结果为 totto2727/x、Juwan-Hwang/moon-certified、bobzhang/games、gmlewis/step、prowk/mooncql。额外读取这五个精确版本的公开 manifest 和仓库 README，分别是工具集合、通用算法、游戏、STEP 建模和 Cassandra 驱动；未据模糊搜索的命中本身判定重复。没有声称完整审阅这五个项目的所有源码和测试。GitHub 精确行为搜索仍无 pix2ang/nested_to_ring 实现命中；HEALPix 两处仍是此前核对过的 grib2 标签。注册表仅有本项目预留记录与已记录近邻，没有新直接候选。
 
 本次复查公开输出保存在仓库外验收证据目录；不覆盖私有、未发布和未索引代码。最终结论仍限于：**在已记录检索范围内未发现成熟直接替代**。
+
+## 邮件补充后的范围复核（2026-11-13）
+
+本次是在原项目和原历史上完善基础能力，保留以上 2026-11-09 的选题比较记录。新增范围为 HEALPix 邻域、双线性插值、凸球面多边形、保守像素覆盖、层级检索和空间 MOC ASCII/JSON。下述复查专门针对这些新增语义；历史“不做 MOC/插值”的范围记录由本节更新，历史实现情况不倒改。
+
+- MoonCakes / `moon search`：healpix、moc、bilinear_interpolation、query_polygon，各最多 100 条；分别返回自身既有模块、65 条模糊 MOC 词命中、11 条插值相关项、22 条多边形相关项。未触及该上限。并非所有模糊结果都做了源码审阅，不能将搜索噪声当成全部排除的证明。
+- GitHub MoonBit 源码搜索：HEALPix 为已查过的 GRIB 模板标签；IVOA 的 5 个结果为数据、编码器测试或字符映射片段，未识别出可导入的空间 MOC 实现，但未声称逐一审查其全部仓库；精确 bilinear_interpolation_weights 无返回。检索使用已绑定账号，只读记录 total_count 与 incomplete_results。
+- 读取永久注册表的相关完整指纹，保留 MoonHarmonics（球谐系数分析/合成）的已完成记录及其他保留选题；不把同为球面计算视作同一数据模型。MoonCite、MoonPhone 及所有历史保留条目仍受保护。
+
+### 新相邻项目的源码比较
+
+| 相邻项目 | 实际检查范围 | 数据模型和功能边界 |
+| --- | --- | --- |
+| LING71671/MoonSTRtree 0.2.4 | README；src/extensions/polygon/polygon.mbt；polygon_wbtest.mbt | 平面 Polygon2D、射线法和 Sutherland–Hodgman 裁剪，矩形打包索引；未在所查源码中发现 HEALPix 球面像素投影/邻接、NESTED 单元层级或空间 MOC 文档。源码 blob 分别 6fe213102a059a855be05c51df72d2101f3dfbbd（README）、4e8c7c4d0f71628885ec6c393e88d86a7e7d00bf、85fa3f4eead99652b62a0e0b69a0424947faf657。 |
+| OrisGo/MOctree | README、公开接口、objects/query.mbt、query_test.mbt | 三维对象的 AABB/射线索引；不能用相同的核心单元/查询约定替代球面 HEALPix 邻域、曲边覆盖和 IVOA MOC。检索快照 blob：README e1d509fca56f50f372e490930ce8497ed9109d31、objects/query.mbt 1ad7ad9933f7fbed37e764a62e9a0f9468b2c772、query_test.mbt f3809b0090b72fd2dff9aa0e1c2226a81f61aa75。 |
+| moonbit-geofield / moon-geometry | 沿用此前已读 API/源码/测试范围，未宣称本轮重新完整审计 | 规则经纬网双线性插值与通用平面/地理计算可组合使用；HEALPix 在相邻纬圈上的四点权重、面边界邻接和层级覆盖有独立约定。 |
+
+源码 blob、完整检索输出和取得时间的本地证据保存在仓库外验收目录。只做过源码阅读的相邻项目不声称运行过其测试。
+
+### 更新后的交付边界
+
+新增能力以成熟 astropy-healpix 1.1.3 的邻域/插值行为，以及 IVOA MOC 2.0 空间编码为基线。多边形仅支持一个开半球内的凸、短大圆边多边形。区域覆盖输出保守候选，`interior` 保证全内，`boundary` 可以有误报；不宣称解析精确求交或与 healpy inclusive/fact 策略返回完全相同集合。MOC 限 ICRS 空间 order 0..13、标准 ASCII 与附录 F 的信息性 JSON，不实现 FITS、时间或频率 MOC。
+
+天文目录查询、全球观测分箱、球面场重采样三个既有下游继续保留，并增加空间覆盖交换和任意方向采样。没有换题，也未复用相邻项目的代码或提交历史。受公开索引、模糊搜索及未发布代码限制，复查结论仅为：**在已记录检索范围内未发现成熟直接替代**。

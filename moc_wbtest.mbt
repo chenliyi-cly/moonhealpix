@@ -1,0 +1,11343 @@
+///|
+fn moc_oracle_assert(
+  name : String,
+  actual : Moc,
+  order : Int32,
+  ranges : Array[(Int32, Int32)],
+  uniq : Array[Int32],
+  ascii : String,
+  json : String,
+) -> Unit raise {
+  let limits = MocLimits::default()
+  assert_eq(actual.max_order(), order)
+  assert_eq(actual.pixel_set().ranges().map(r => (r.start(), r.end())), ranges)
+  assert_eq(actual.uniq(limits), uniq)
+  let output_ascii = actual.to_ascii(limits)
+  let output_json = actual.to_json(limits)
+  assert_eq(output_ascii, ascii)
+  assert_eq(output_json, json)
+  // scripts/generate_moc_oracle.py reads these ACTUAL MoonBit outputs and
+  // submits both serializations to mocpy, checking its independent coverage.
+  println("MOC_INTEROP|\{name}|\{output_ascii}|\{output_json}")
+}
+
+///|
+fn moc_expect_error(
+  expected : HealpixError,
+  action : () -> Unit raise HealpixError,
+) -> Unit raise {
+  let result : HealpixError? = try {
+    action()
+    None
+  } catch {
+    e => Some(e)
+  }
+  assert_eq(result, Some(expected))
+}
+
+///|
+test "moc documented spatial encodings, compaction and resolution metadata" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii("s1/1 2 4 2/12-14 21 23 25 8/", limits)
+  let b = Moc::from_json(
+    "{\"s\":{\"8\":[],\"2\":[12,13,14,21,23,25],\"1\":[1,2,4]}}", limits,
+  )
+  assert_true(a.equals(b))
+  assert_eq(a.max_order(), 8)
+  assert_eq(a.to_ascii(limits), "1/1-2 4 2/12-14 21 23 25 8/")
+  assert_eq(
+    a.to_json(limits),
+    "{\"1\":[1,2,4],\"2\":[12,13,14,21,23,25],\"8\":[]}",
+  )
+  let siblings = Moc::from_ascii("13/0-3", limits)
+  assert_eq(siblings.to_ascii(limits), "12/0 13/")
+  assert_eq(siblings.to_json(limits), "{\"12\":[0],\"13\":[]}")
+  for order = 0; order <= 13; order = order + 1 {
+    let empty = Moc::empty(order)
+    assert_eq(empty.to_ascii(limits), "\{order}/")
+    assert_eq(empty.to_json(limits), "{\"\{order}\":[]}")
+    assert_eq(empty.uniq(limits), [])
+  }
+  assert_eq(Moc::from_json("{}", limits).max_order(), 0)
+  assert_eq(Moc::from_json("{\"s\":{}}", limits).max_order(), 0)
+  let escaped = Moc::from_json(
+    "{\"\\u0073\":{\"\\u0031\\u0033\":[805306367]}}", limits,
+  )
+  assert_eq(escaped.uniq(limits), [1073741823])
+  assert_eq(escaped.max_order(), 13)
+}
+
+///|
+test "moc constructors normalize copies, NUNIQ and exact NESTED PixelSet conversion" {
+  let limits = MocLimits::default()
+  let g = Grid::from_level(1)
+  let cells = [
+    Cell::new(g, 3),
+    Cell::new(g, 0),
+    Cell::new(g, 2),
+    Cell::new(g, 1),
+    Cell::new(g, 0),
+  ]
+  let a = Moc::from_cells(cells, 13, limits)
+  cells.clear()
+  assert_eq(a.uniq(limits), [4])
+  assert_eq(a.max_order(), 13)
+  let uniq = [19, 16, 17, 18, 4, 4]
+  let b = Moc::from_uniq(uniq, 13, limits)
+  uniq.clear()
+  assert_true(a.equals(b))
+  let copy = a.pixel_set()
+  copy.spans.clear()
+  assert_eq(a.uniq(limits), [4])
+  let c = Moc::from_pixel_set(a.pixel_set(), 0, limits)
+  assert_true(a.equals(c))
+  assert_eq(c.max_order(), 0)
+  let cells = a.cells(limits)
+  cells.clear()
+  assert_eq(a.uniq(limits), [4])
+  let max = Moc::from_uniq([1073741823], 13, limits)
+  assert_eq(max.to_ascii(limits), "13/805306367")
+  assert_eq(Moc::from_cells(max.cells(limits), 13, limits).uniq(limits), [
+    1073741823,
+  ])
+  moc_expect_error(InvalidOrder(13), () => {
+    Moc::from_uniq([1073741823], 12, limits) |> ignore
+  })
+  moc_expect_error(InvalidOrder(14), () => {
+    Moc::from_uniq([1073741824], 13, limits) |> ignore
+  })
+  for u in [-1, 0, 3] {
+    moc_expect_error(InvalidRange, () => {
+      Moc::from_uniq([u], 13, limits) |> ignore
+    })
+  }
+  moc_expect_error(InvalidOrder(14), () => Moc::empty(14) |> ignore)
+  moc_expect_error(InvalidOrder(-1), () => Moc::empty(-1) |> ignore)
+  let fine = Grid::from_level(13)
+  let partial = PixelSet::new(fine, Nested, [PixelRange::new(fine, 0, 1)])
+  moc_expect_error(InvalidRange, () => {
+    Moc::from_pixel_set(partial, 0, limits) |> ignore
+  })
+  let ring = PixelSet::new(g, Ring, [PixelRange::new(g, 0, 1)])
+  moc_expect_error(IncompatibleGrid, () => {
+    Moc::from_pixel_set(ring, 1, limits) |> ignore
+  })
+}
+
+///|
+test "moc set operations preserve exact coverage and maximum input resolution" {
+  let limits = MocLimits::default()
+  let root = Moc::from_ascii("0/0", limits)
+  let fine = Moc::from_ascii("13/0", limits)
+  let union = root.union(fine, limits)
+  assert_true(union.equals(root))
+  assert_eq(union.max_order(), 13)
+  assert_eq(root.intersection(fine, limits).uniq(limits), fine.uniq(limits))
+  assert_eq(root.difference(fine, limits).pixel_set().count(), 67108863)
+  assert_eq(root.difference(fine, limits).max_order(), 13)
+  let all = Moc::from_ascii("13/0-805306367", limits)
+  assert_eq(all.pixel_set().count(), 805306368)
+  assert_eq(all.cells(limits).length(), 12)
+  assert_eq(all.complement(limits).max_order(), 13)
+  assert_eq(all.complement(limits).uniq(limits), [])
+  assert_true(fine.complement(limits).union(fine, limits).equals(all))
+  assert_eq(fine.complement(limits).intersection(fine, limits).uniq(limits), [])
+  assert_true(Moc::empty(13).complement(limits).equals(all))
+}
+
+///|
+test "moc ASCII rejects malformed, overlapping, nonascending and nonspatial input" {
+  let limits = MocLimits::default()
+  for
+    text in [
+      "", " ", "s", "1", "/1", "0//1", "0/1/2", "0/-1", "-1/0", "0/+1", "0/1.0",
+      "0/1e0", "0/1,2", "0/1-", "0/1--2", "0/2-1", "0/12", "13/805306368", "0/1 junk",
+      "0/1x", "0/1\t2", "0/1\u{00a0}2", "0/ 1/0", "0/1 0/0", "2/0 1/2", "0/1 1",
+      "0/0 1/0", "1/0-3 2/0", "0/1 13/ 12/", "0/2147483648", "999999999999999999999/0",
+      "t0/0", "t1/0 s1/0", "f0/0", "s 0/0", "ss0/0", "0/١", "0/１",
+    ] {
+    moc_expect_error(InvalidData, () => Moc::from_ascii(text, limits) |> ignore)
+  }
+  for order in [14, 29, 2147483647] {
+    moc_expect_error(InvalidOrder(order), () => {
+      Moc::from_ascii("\{order}/0", limits) |> ignore
+    })
+    moc_expect_error(InvalidOrder(order), () => {
+      Moc::from_ascii("0/0 \{order}/", limits) |> ignore
+    })
+  }
+}
+
+///|
+test "moc JSON rejects malformed grammar, duplicate keys and unsupported dimensions" {
+  let limits = MocLimits::default()
+  for
+    text in [
+      "", "[]", "null", "true", "{", "}", "{\"0\":}", "{\"0\":{}}", "{\"0\":null}",
+      "{\"0\":[0,]}", "{\"0\":[,0]}", "{\"0\":[0,,1]}", "{\"0\":[0],}", "{\"0\":[0]}x",
+      "{\"0\":[-1]}", "{\"0\":[+1]}", "{\"0\":[01]}", "{\"0\":[1.0]}", "{\"0\":[1e0]}",
+      "{\"0\":[true]}", "{\"0\":[\"1\"]}", "{\"0\":[[1]]}", "{\"0\":[2147483648]}",
+      "{\"0\":[12]}", "{\"13\":[805306368]}", "{\"0\":[2,1]}", "{\"0\":[1,1]}", "{\"0\":[0],\"1\":[0]}",
+      "{\"0\":[1],\"0\":[2]}", "{\"0\":[1],\"\\u0030\":[2]}", "{\"00\":[1]}", "{\"\":[1]}",
+      "{\"-1\":[0]}", "{\"1.0\":[0]}", "{0:[1]}", "{\"t\":{\"0\":[0]}}", "{\"s\":{\"0\":[0]},\"t\":{}}",
+      "{\"s\":{\"s\":{}}}", "{\"s\":[]}", "{\"s\":{},\"s\":{}}", "{\"unknown\":[]}",
+      "{\"\\u00xz\":[]}", "{\"\\uD800\":[]}", "{\"\\n\":[]}", "{\"０\":[1]}", "{\"0\":[١]}",
+      "{\"0\":[0]} {}", "{\"0\":[0]/*comment*/}", "{\"0\":[0]\u{000b}}",
+    ] {
+    moc_expect_error(InvalidData, () => Moc::from_json(text, limits) |> ignore)
+  }
+  for order in [14, 29, 2147483647] {
+    moc_expect_error(InvalidOrder(order), () => {
+      Moc::from_json("{\"\{order}\":[]}", limits) |> ignore
+    })
+  }
+}
+
+///|
+test "moc resource limits bound input, candidate ranges, output cells and text" {
+  let limits = MocLimits::default()
+  for
+    args in [
+      (-1, 1, 1),
+      (1, -1, 1),
+      (1, 1, -1),
+      (100001, 1, 1),
+      (1, 100001, 1),
+      (1, 1, 4194305),
+    ] {
+    moc_expect_error(ResourceLimit, () => {
+      MocLimits::new(args.0, args.1, args.2) |> ignore
+    })
+  }
+  let zero = MocLimits::new(0, 0, 0)
+  moc_expect_error(ResourceLimit, () => Moc::from_ascii("0/", zero) |> ignore)
+  moc_expect_error(ResourceLimit, () => Moc::from_json("{}", zero) |> ignore)
+  let no_ranges = MocLimits::new(0, 100, 100)
+  assert_eq(Moc::from_ascii("13/", no_ranges).max_order(), 13)
+  moc_expect_error(ResourceLimit, () => {
+    Moc::from_ascii("0/0", no_ranges) |> ignore
+  })
+  moc_expect_error(ResourceLimit, () => {
+    Moc::from_json("{\"0\":[0]}", no_ranges) |> ignore
+  })
+  let one = MocLimits::new(1, 12, 100)
+  // 805 million pixels remain one interval; exactly twelve canonical cells.
+  let all = Moc::from_ascii("13/0-805306367", one)
+  assert_eq(all.to_ascii(one), "0/0-11 13/")
+  assert_eq(all.cells(one).length(), 12)
+  moc_expect_error(ResourceLimit, () => {
+    all.cells(MocLimits::new(1, 11, 100)) |> ignore
+  })
+  moc_expect_error(ResourceLimit, () => {
+    all.to_json(MocLimits::new(1, 11, 100)) |> ignore
+  })
+  moc_expect_error(ResourceLimit, () => Moc::from_ascii("13/0 2", one) |> ignore)
+  moc_expect_error(ResourceLimit, () => {
+    Moc::from_json("{\"13\":[0,2]}", one) |> ignore
+  })
+  let root = Moc::from_ascii("0/0", limits)
+  let cells = root.cells(limits)
+  moc_expect_error(ResourceLimit, () => {
+    Moc::from_cells(cells, 0, no_ranges) |> ignore
+  })
+  moc_expect_error(ResourceLimit, () => {
+    Moc::from_uniq([4], 0, MocLimits::new(1, 0, 100)) |> ignore
+  })
+  moc_expect_error(ResourceLimit, () => {
+    Moc::from_pixel_set(root.pixel_set(), 0, no_ranges) |> ignore
+  })
+  for fmt in [false, true] {
+    let text = if fmt { root.to_json(limits) } else { root.to_ascii(limits) }
+    let exact = MocLimits::new(1, 1, text.length())
+    let short = MocLimits::new(1, 1, text.length() - 1)
+    if fmt {
+      assert_eq(root.to_json(exact), text)
+      assert_true(Moc::from_json(text, exact).equals(root))
+      moc_expect_error(ResourceLimit, () => root.to_json(short) |> ignore)
+      moc_expect_error(ResourceLimit, () => {
+        Moc::from_json(text, short) |> ignore
+      })
+    } else {
+      assert_eq(root.to_ascii(exact), text)
+      assert_true(Moc::from_ascii(text, exact).equals(root))
+      moc_expect_error(ResourceLimit, () => root.to_ascii(short) |> ignore)
+      moc_expect_error(ResourceLimit, () => {
+        Moc::from_ascii(text, short) |> ignore
+      })
+    }
+  }
+  moc_expect_error(ResourceLimit, () => root.union(root, one) |> ignore)
+  moc_expect_error(ResourceLimit, () => root.intersection(root, one) |> ignore)
+  moc_expect_error(ResourceLimit, () => root.difference(root, one) |> ignore)
+  moc_expect_error(ResourceLimit, () => root.complement(one) |> ignore)
+  moc_expect_error(ResourceLimit, () => {
+    root.uniq(MocLimits::new(1, 0, 100)) |> ignore
+  })
+  moc_expect_error(ResourceLimit, () => Moc::empty(13).to_ascii(zero) |> ignore)
+}
+
+///|
+// Conversion evidence only: the independent Python check reconstructs this
+// exact source PixelSet in mocpy from depth-29 ranges, WITHOUT reading either
+// MoonBit MOC serialization as its expectation. Geometry policies differ.
+fn moc_cover_export(name : String, source : PixelSet) -> Unit raise {
+  let limits = MocLimits::default()
+  let order = source.grid().level()
+  let moc = Moc::from_pixel_set(source, order, limits)
+  assert_eq(moc.max_order(), order)
+  assert_eq(moc.pixel_set().at_level(order).ranges(), source.ranges())
+  let ranges = StringBuilder()
+  for i = 0; i < source.spans.length(); i = i + 1 {
+    if i > 0 {
+      ranges.write_string(",")
+    }
+    let r = source.spans[i]
+    ranges.write_string("\{r.start}:\{r.end}")
+  }
+  println(
+    "MOC_COVER|\{name}|\{order}|\{ranges.to_string()}|\{moc.to_ascii(limits)}|\{moc.to_json(limits)}",
+  )
+}
+
+// BEGIN GENERATED MOC ORACLE -- scripts/generate_moc_oracle.py
+// Expected coverage, compact UNIQ, order and strings come from mocpy 0.21.0.
+
+///|
+test "moc oracle ivoa-section-4.3.2" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii("1/1 2 4 2/12-14 21 23 25 8/", limits)
+  moc_oracle_assert(
+    "ivoa-section-4.3.2",
+    actual,
+    8,
+    [
+      (16777216, 62914560),
+      (67108864, 83886080),
+      (88080384, 92274688),
+      (96468992, 100663296),
+      (104857600, 109051904),
+    ],
+    [17, 18, 20, 76, 77, 78, 85, 87, 89],
+    "1/1-2 4 2/12-14 21 23 25 8/",
+    "{\"1\":[1,2,4],\"2\":[12,13,14,21,23,25],\"8\":[]}",
+  )
+}
+
+///|
+test "moc oracle JSON ivoa-section-4.3.2" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii("1/1 2 4 2/12-14 21 23 25 8/", limits)
+  let json = Moc::from_json(
+    "{\n  \"1\": [1, 2, 4],\n  \"2\": [12, 13, 14, 21, 23, 25],\n  \"8\": []\n}",
+    limits,
+  )
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle empty-0" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii("0/", limits)
+  moc_oracle_assert("empty-0", actual, 0, [], [], "0/", "{\"0\":[]}")
+}
+
+///|
+test "moc oracle JSON empty-0" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii("0/", limits)
+  let json = Moc::from_json("{\n  \"0\": []\n}", limits)
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle empty-13" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii("13/", limits)
+  moc_oracle_assert("empty-13", actual, 13, [], [], "13/", "{\"13\":[]}")
+}
+
+///|
+test "moc oracle JSON empty-13" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii("13/", limits)
+  let json = Moc::from_json("{\n  \"13\": []\n}", limits)
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle all-sky" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii("0/0-11", limits)
+  moc_oracle_assert(
+    "all-sky",
+    actual,
+    0,
+    [(0, 805306368)],
+    [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+    "0/0-11",
+    "{\"0\":[0,1,2,3,4,5,6,7,8,9,10,11]}",
+  )
+}
+
+///|
+test "moc oracle JSON all-sky" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii("0/0-11", limits)
+  let json = Moc::from_json(
+    "{\n  \"0\": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]\n}", limits,
+  )
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle all-sky-order13" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii("0/0-11 13/", limits)
+  moc_oracle_assert(
+    "all-sky-order13",
+    actual,
+    13,
+    [(0, 805306368)],
+    [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+    "0/0-11 13/",
+    "{\"0\":[0,1,2,3,4,5,6,7,8,9,10,11],\"13\":[]}",
+  )
+}
+
+///|
+test "moc oracle JSON all-sky-order13" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii("0/0-11 13/", limits)
+  let json = Moc::from_json(
+    "{\n  \"0\": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],\n  \"13\": []\n}", limits,
+  )
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle siblings" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii("13/0-3", limits)
+  moc_oracle_assert(
+    "siblings",
+    actual,
+    13,
+    [(0, 4)],
+    [67108864],
+    "12/0 13/",
+    "{\"12\":[0],\"13\":[]}",
+  )
+}
+
+///|
+test "moc oracle JSON siblings" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii("13/0-3", limits)
+  let json = Moc::from_json("{\n  \"12\": [0],\n  \"13\": []\n}", limits)
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle large-range" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii("13/0-805306367", limits)
+  moc_oracle_assert(
+    "large-range",
+    actual,
+    13,
+    [(0, 805306368)],
+    [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+    "0/0-11 13/",
+    "{\"0\":[0,1,2,3,4,5,6,7,8,9,10,11],\"13\":[]}",
+  )
+}
+
+///|
+test "moc oracle JSON large-range" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii("13/0-805306367", limits)
+  let json = Moc::from_json(
+    "{\n  \"0\": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],\n  \"13\": []\n}", limits,
+  )
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle last-cell" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii("13/805306367", limits)
+  moc_oracle_assert(
+    "last-cell",
+    actual,
+    13,
+    [(805306367, 805306368)],
+    [1073741823],
+    "13/805306367",
+    "{\"13\":[805306367]}",
+  )
+}
+
+///|
+test "moc oracle JSON last-cell" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii("13/805306367", limits)
+  let json = Moc::from_json("{\n  \"13\": [805306367]\n}", limits)
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle faces" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii("0/0 11 13/", limits)
+  moc_oracle_assert(
+    "faces",
+    actual,
+    13,
+    [(0, 67108864), (738197504, 805306368)],
+    [4, 15],
+    "0/0 11 13/",
+    "{\"0\":[0,11],\"13\":[]}",
+  )
+}
+
+///|
+test "moc oracle JSON faces" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii("0/0 11 13/", limits)
+  let json = Moc::from_json("{\n  \"0\": [0, 11],\n  \"13\": []\n}", limits)
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle folded" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii("1/\r\n1 2 4\n2/12-14 21 23 25\r8/", limits)
+  moc_oracle_assert(
+    "folded",
+    actual,
+    8,
+    [
+      (16777216, 62914560),
+      (67108864, 83886080),
+      (88080384, 92274688),
+      (96468992, 100663296),
+      (104857600, 109051904),
+    ],
+    [17, 18, 20, 76, 77, 78, 85, 87, 89],
+    "1/1-2 4 2/12-14 21 23 25 8/",
+    "{\"1\":[1,2,4],\"2\":[12,13,14,21,23,25],\"8\":[]}",
+  )
+}
+
+///|
+test "moc oracle JSON folded" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii("1/\r\n1 2 4\n2/12-14 21 23 25\r8/", limits)
+  let json = Moc::from_json(
+    "{\n  \"1\": [1, 2, 4],\n  \"2\": [12, 13, 14, 21, 23, 25],\n  \"8\": []\n}",
+    limits,
+  )
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle leading-zero-ascii" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii("00/01 02 13/", limits)
+  moc_oracle_assert(
+    "leading-zero-ascii",
+    actual,
+    13,
+    [(67108864, 201326592)],
+    [5, 6],
+    "0/1-2 13/",
+    "{\"0\":[1,2],\"13\":[]}",
+  )
+}
+
+///|
+test "moc oracle JSON leading-zero-ascii" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii("00/01 02 13/", limits)
+  let json = Moc::from_json("{\n  \"0\": [1, 2],\n  \"13\": []\n}", limits)
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle repeated-order" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii("1/0 1/2 3 13/", limits)
+  moc_oracle_assert(
+    "repeated-order",
+    actual,
+    13,
+    [(0, 16777216), (33554432, 67108864)],
+    [16, 18, 19],
+    "1/0 2-3 13/",
+    "{\"1\":[0,2,3],\"13\":[]}",
+  )
+}
+
+///|
+test "moc oracle JSON repeated-order" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii("1/0 1/2 3 13/", limits)
+  let json = Moc::from_json("{\n  \"1\": [0, 2, 3],\n  \"13\": []\n}", limits)
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle order-0" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii("0/0 11", limits)
+  moc_oracle_assert(
+    "order-0",
+    actual,
+    0,
+    [(0, 67108864), (738197504, 805306368)],
+    [4, 15],
+    "0/0 11",
+    "{\"0\":[0,11]}",
+  )
+}
+
+///|
+test "moc oracle JSON order-0" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii("0/0 11", limits)
+  let json = Moc::from_json("{\n  \"0\": [0, 11]\n}", limits)
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle order-1" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii("1/0 47", limits)
+  moc_oracle_assert(
+    "order-1",
+    actual,
+    1,
+    [(0, 16777216), (788529152, 805306368)],
+    [16, 63],
+    "1/0 47",
+    "{\"1\":[0,47]}",
+  )
+}
+
+///|
+test "moc oracle JSON order-1" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii("1/0 47", limits)
+  let json = Moc::from_json("{\n  \"1\": [0, 47]\n}", limits)
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle order-2" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii("2/0 191", limits)
+  moc_oracle_assert(
+    "order-2",
+    actual,
+    2,
+    [(0, 4194304), (801112064, 805306368)],
+    [64, 255],
+    "2/0 191",
+    "{\"2\":[0,191]}",
+  )
+}
+
+///|
+test "moc oracle JSON order-2" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii("2/0 191", limits)
+  let json = Moc::from_json("{\n  \"2\": [0, 191]\n}", limits)
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle order-3" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii("3/0 767", limits)
+  moc_oracle_assert(
+    "order-3",
+    actual,
+    3,
+    [(0, 1048576), (804257792, 805306368)],
+    [256, 1023],
+    "3/0 767",
+    "{\"3\":[0,767]}",
+  )
+}
+
+///|
+test "moc oracle JSON order-3" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii("3/0 767", limits)
+  let json = Moc::from_json("{\n  \"3\": [0, 767]\n}", limits)
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle order-4" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii("4/0 3071", limits)
+  moc_oracle_assert(
+    "order-4",
+    actual,
+    4,
+    [(0, 262144), (805044224, 805306368)],
+    [1024, 4095],
+    "4/0 3071",
+    "{\"4\":[0,3071]}",
+  )
+}
+
+///|
+test "moc oracle JSON order-4" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii("4/0 3071", limits)
+  let json = Moc::from_json("{\n  \"4\": [0, 3071]\n}", limits)
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle order-5" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii("5/0 12287", limits)
+  moc_oracle_assert(
+    "order-5",
+    actual,
+    5,
+    [(0, 65536), (805240832, 805306368)],
+    [4096, 16383],
+    "5/0 12287",
+    "{\"5\":[0,12287]}",
+  )
+}
+
+///|
+test "moc oracle JSON order-5" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii("5/0 12287", limits)
+  let json = Moc::from_json("{\n  \"5\": [0, 12287]\n}", limits)
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle order-6" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii("6/0 49151", limits)
+  moc_oracle_assert(
+    "order-6",
+    actual,
+    6,
+    [(0, 16384), (805289984, 805306368)],
+    [16384, 65535],
+    "6/0 49151",
+    "{\"6\":[0,49151]}",
+  )
+}
+
+///|
+test "moc oracle JSON order-6" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii("6/0 49151", limits)
+  let json = Moc::from_json("{\n  \"6\": [0, 49151]\n}", limits)
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle order-7" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii("7/0 196607", limits)
+  moc_oracle_assert(
+    "order-7",
+    actual,
+    7,
+    [(0, 4096), (805302272, 805306368)],
+    [65536, 262143],
+    "7/0 196607",
+    "{\"7\":[0,196607]}",
+  )
+}
+
+///|
+test "moc oracle JSON order-7" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii("7/0 196607", limits)
+  let json = Moc::from_json("{\n  \"7\": [0, 196607]\n}", limits)
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle order-8" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii("8/0 786431", limits)
+  moc_oracle_assert(
+    "order-8",
+    actual,
+    8,
+    [(0, 1024), (805305344, 805306368)],
+    [262144, 1048575],
+    "8/0 786431",
+    "{\"8\":[0,786431]}",
+  )
+}
+
+///|
+test "moc oracle JSON order-8" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii("8/0 786431", limits)
+  let json = Moc::from_json("{\n  \"8\": [0, 786431]\n}", limits)
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle order-9" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii("9/0 3145727", limits)
+  moc_oracle_assert(
+    "order-9",
+    actual,
+    9,
+    [(0, 256), (805306112, 805306368)],
+    [1048576, 4194303],
+    "9/0 3145727",
+    "{\"9\":[0,3145727]}",
+  )
+}
+
+///|
+test "moc oracle JSON order-9" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii("9/0 3145727", limits)
+  let json = Moc::from_json("{\n  \"9\": [0, 3145727]\n}", limits)
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle order-10" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii("10/0 12582911", limits)
+  moc_oracle_assert(
+    "order-10",
+    actual,
+    10,
+    [(0, 64), (805306304, 805306368)],
+    [4194304, 16777215],
+    "10/0 12582911",
+    "{\"10\":[0,12582911]}",
+  )
+}
+
+///|
+test "moc oracle JSON order-10" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii("10/0 12582911", limits)
+  let json = Moc::from_json("{\n  \"10\": [0, 12582911]\n}", limits)
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle order-11" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii("11/0 50331647", limits)
+  moc_oracle_assert(
+    "order-11",
+    actual,
+    11,
+    [(0, 16), (805306352, 805306368)],
+    [16777216, 67108863],
+    "11/0 50331647",
+    "{\"11\":[0,50331647]}",
+  )
+}
+
+///|
+test "moc oracle JSON order-11" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii("11/0 50331647", limits)
+  let json = Moc::from_json("{\n  \"11\": [0, 50331647]\n}", limits)
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle order-12" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii("12/0 201326591", limits)
+  moc_oracle_assert(
+    "order-12",
+    actual,
+    12,
+    [(0, 4), (805306364, 805306368)],
+    [67108864, 268435455],
+    "12/0 201326591",
+    "{\"12\":[0,201326591]}",
+  )
+}
+
+///|
+test "moc oracle JSON order-12" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii("12/0 201326591", limits)
+  let json = Moc::from_json("{\n  \"12\": [0, 201326591]\n}", limits)
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle order-13" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii("13/0 805306367", limits)
+  moc_oracle_assert(
+    "order-13",
+    actual,
+    13,
+    [(0, 1), (805306367, 805306368)],
+    [268435456, 1073741823],
+    "13/0 805306367",
+    "{\"13\":[0,805306367]}",
+  )
+}
+
+///|
+test "moc oracle JSON order-13" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii("13/0 805306367", limits)
+  let json = Moc::from_json("{\n  \"13\": [0, 805306367]\n}", limits)
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle cells-00" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii("0/5 2/2", limits)
+  moc_oracle_assert(
+    "cells-00",
+    actual,
+    2,
+    [(8388608, 12582912), (335544320, 402653184)],
+    [9, 66],
+    "0/5 2/2",
+    "{\"0\":[5],\"2\":[2]}",
+  )
+}
+
+///|
+test "moc oracle JSON cells-00" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii("0/5 2/2", limits)
+  let json = Moc::from_json("{\n  \"0\": [5],\n  \"2\": [2]\n}", limits)
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle normalize cells-00" {
+  let limits = MocLimits::default()
+  let cells = [
+    Cell::new(Grid::from_level(0), 5),
+    Cell::new(Grid::from_level(2), 2),
+  ]
+  let actual = Moc::from_cells(cells, 2, limits)
+  let expected = Moc::from_ascii("0/5 2/2", limits)
+  assert_true(actual.equals(expected))
+  assert_eq(actual.max_order(), expected.max_order())
+}
+
+///|
+test "moc oracle cells-01" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii("0/6 8 10 1/38 2/24 4/127 2046 7/", limits)
+  moc_oracle_assert(
+    "cells-01",
+    actual,
+    7,
+    [
+      (33292288, 33554432),
+      (100663296, 104857600),
+      (402653184, 469762048),
+      (536346624, 536608768),
+      (536870912, 603979776),
+      (637534208, 654311424),
+      (671088640, 738197504),
+    ],
+    [10, 12, 14, 54, 88, 1151, 3070],
+    "0/6 8 10 1/38 2/24 4/127 2046 7/",
+    "{\"0\":[6,8,10],\"1\":[38],\"2\":[24],\"4\":[127,2046],\"7\":[]}",
+  )
+}
+
+///|
+test "moc oracle JSON cells-01" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii("0/6 8 10 1/38 2/24 4/127 2046 7/", limits)
+  let json = Moc::from_json(
+    "{\n  \"0\": [6, 8, 10],\n  \"1\": [38],\n  \"2\": [24],\n  \"4\": [127, 2046],\n  \"7\": []\n}",
+    limits,
+  )
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle normalize cells-01" {
+  let limits = MocLimits::default()
+  let cells = [
+    Cell::new(Grid::from_level(2), 24),
+    Cell::new(Grid::from_level(0), 6),
+    Cell::new(Grid::from_level(0), 8),
+    Cell::new(Grid::from_level(1), 38),
+    Cell::new(Grid::from_level(4), 127),
+    Cell::new(Grid::from_level(4), 2046),
+    Cell::new(Grid::from_level(0), 10),
+    Cell::new(Grid::from_level(4), 2065),
+  ]
+  let actual = Moc::from_cells(cells, 7, limits)
+  let expected = Moc::from_ascii("0/6 8 10 1/38 2/24 4/127 2046 7/", limits)
+  assert_true(actual.equals(expected))
+  assert_eq(actual.max_order(), expected.max_order())
+}
+
+///|
+test "moc oracle cells-02" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii(
+    "0/0 2 8-9 11 1/22 2/19 3/212 395 4/426 1126 1618 5/11108 11210 6/15241 21341 7/25880 81544 97396 103300 103398 173467 8/213687 391072 455589 10/11294554 11/18976498 28039721",
+    limits,
+  )
+  moc_oracle_assert(
+    "cells-02",
+    actual,
+    11,
+    [
+      (0, 67108864),
+      (79691776, 83886080),
+      (106004480, 106008576),
+      (111673344, 111935488),
+      (134217728, 201326592),
+      (218815488, 218816512),
+      (222298112, 223346688),
+      (249708544, 249724928),
+      (295174144, 295436288),
+      (303623968, 303623984),
+      (334004224, 334008320),
+      (349650944, 349667328),
+      (369098752, 385875968),
+      (398934016, 398938112),
+      (400457728, 400458752),
+      (414187520, 415236096),
+      (423116800, 423120896),
+      (423518208, 423522304),
+      (424148992, 424411136),
+      (448635536, 448635552),
+      (466523136, 466524160),
+      (536870912, 671088640),
+      (710520832, 710524928),
+      (722851456, 722851520),
+      (727973888, 728039424),
+      (734658560, 734724096),
+      (738197504, 805306368),
+    ],
+    [
+      4, 6, 12, 13, 15, 38, 83, 468, 651, 1450, 2150, 2642, 15204, 15306, 31625,
+      37725, 91416, 147080, 162932, 168836, 168934, 239003, 475831, 653216, 717733,
+      15488858, 35753714, 44816937,
+    ],
+    "0/0 2 8-9 11 1/22 2/19 3/212 395 4/426 1126 1618 5/11108 11210 6/15241 21341 7/25880 81544 97396 103300 103398 173467 8/213687 391072 455589 10/11294554 11/18976498 28039721",
+    "{\"0\":[0,2,8,9,11],\"1\":[22],\"2\":[19],\"3\":[212,395],\"4\":[426,1126,1618],\"5\":[11108,11210],\"6\":[15241,21341],\"7\":[25880,81544,97396,103300,103398,173467],\"8\":[213687,391072,455589],\"10\":[11294554],\"11\":[18976498,28039721]}",
+  )
+}
+
+///|
+test "moc oracle JSON cells-02" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii(
+    "0/0 2 8-9 11 1/22 2/19 3/212 395 4/426 1126 1618 5/11108 11210 6/15241 21341 7/25880 81544 97396 103300 103398 173467 8/213687 391072 455589 10/11294554 11/18976498 28039721",
+    limits,
+  )
+  let json = Moc::from_json(
+    "{\n  \"0\": [0, 2, 8, 9, 11],\n  \"1\": [22],\n  \"2\": [19],\n  \"3\": [212, 395],\n  \"4\": [426, 1126, 1618],\n  \"5\": [11108, 11210],\n  \"6\": [15241, 21341],\n  \"7\": [25880, 81544, 97396, 103300, 103398, 173467],\n  \"8\": [213687, 391072, 455589],\n  \"10\": [11294554],\n  \"11\": [18976498, 28039721]\n}",
+    limits,
+  )
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle normalize cells-02" {
+  let limits = MocLimits::default()
+  let cells = [
+    Cell::new(Grid::from_level(4), 192),
+    Cell::new(Grid::from_level(7), 103398),
+    Cell::new(Grid::from_level(5), 11210),
+    Cell::new(Grid::from_level(11), 18976498),
+    Cell::new(Grid::from_level(2), 42),
+    Cell::new(Grid::from_level(1), 22),
+    Cell::new(Grid::from_level(7), 103300),
+    Cell::new(Grid::from_level(4), 1618),
+    Cell::new(Grid::from_level(5), 8600),
+    Cell::new(Grid::from_level(0), 8),
+    Cell::new(Grid::from_level(7), 173467),
+    Cell::new(Grid::from_level(11), 28039721),
+    Cell::new(Grid::from_level(5), 8895),
+    Cell::new(Grid::from_level(7), 25880),
+    Cell::new(Grid::from_level(4), 1126),
+    Cell::new(Grid::from_level(0), 0),
+    Cell::new(Grid::from_level(11), 10565338),
+    Cell::new(Grid::from_level(11), 10916321),
+    Cell::new(Grid::from_level(10), 11294554),
+    Cell::new(Grid::from_level(2), 19),
+    Cell::new(Grid::from_level(7), 97396),
+    Cell::new(Grid::from_level(2), 131),
+    Cell::new(Grid::from_level(3), 395),
+    Cell::new(Grid::from_level(5), 11108),
+    Cell::new(Grid::from_level(3), 212),
+    Cell::new(Grid::from_level(6), 21341),
+    Cell::new(Grid::from_level(1), 37),
+    Cell::new(Grid::from_level(1), 33),
+    Cell::new(Grid::from_level(2), 155),
+    Cell::new(Grid::from_level(3), 730),
+    Cell::new(Grid::from_level(8), 455589),
+    Cell::new(Grid::from_level(11), 47801403),
+    Cell::new(Grid::from_level(9), 3082938),
+    Cell::new(Grid::from_level(1), 8),
+    Cell::new(Grid::from_level(0), 11),
+    Cell::new(Grid::from_level(9), 2302095),
+    Cell::new(Grid::from_level(10), 10067727),
+    Cell::new(Grid::from_level(0), 2),
+    Cell::new(Grid::from_level(6), 39977),
+    Cell::new(Grid::from_level(10), 2269840),
+    Cell::new(Grid::from_level(8), 213687),
+    Cell::new(Grid::from_level(7), 81544),
+    Cell::new(Grid::from_level(10), 885251),
+    Cell::new(Grid::from_level(10), 9152289),
+    Cell::new(Grid::from_level(4), 7),
+    Cell::new(Grid::from_level(11), 38906079),
+    Cell::new(Grid::from_level(3), 764),
+    Cell::new(Grid::from_level(6), 23454),
+    Cell::new(Grid::from_level(8), 391072),
+    Cell::new(Grid::from_level(0), 9),
+    Cell::new(Grid::from_level(4), 426),
+    Cell::new(Grid::from_level(6), 15241),
+    Cell::new(Grid::from_level(2), 33),
+    Cell::new(Grid::from_level(8), 366921),
+    Cell::new(Grid::from_level(3), 46),
+  ]
+  let actual = Moc::from_cells(cells, 11, limits)
+  let expected = Moc::from_ascii(
+    "0/0 2 8-9 11 1/22 2/19 3/212 395 4/426 1126 1618 5/11108 11210 6/15241 21341 7/25880 81544 97396 103300 103398 173467 8/213687 391072 455589 10/11294554 11/18976498 28039721",
+    limits,
+  )
+  assert_true(actual.equals(expected))
+  assert_eq(actual.max_order(), expected.max_order())
+}
+
+///|
+test "moc oracle cells-03" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii(
+    "0/11 1/20 25 40 43 2/143 155 3/20 4/275 931 1756 2648 5/1856 8173 6/3149 10474 7/149301 8/356900 548363 9/552300 868270",
+    limits,
+  )
+  moc_oracle_assert(
+    "cells-03",
+    actual,
+    9,
+    [
+      (20971520, 22020096),
+      (51593216, 51609600),
+      (72089600, 72351744),
+      (121634816, 121700352),
+      (141388800, 141389056),
+      (171606016, 171622400),
+      (222277120, 222277376),
+      (244056064, 244318208),
+      (335544320, 352321536),
+      (365465600, 365466624),
+      (419430400, 436207616),
+      (460324864, 460587008),
+      (535625728, 535691264),
+      (561523712, 561524736),
+      (599785472, 603979776),
+      (611536896, 611540992),
+      (650117120, 654311424),
+      (671088640, 687865856),
+      (694157312, 694419456),
+      (721420288, 805306368),
+    ],
+    [
+      15, 36, 41, 56, 59, 207, 219, 276, 1299, 1955, 2780, 3672, 5952, 12269, 19533,
+      26858, 214837, 619044, 810507, 1600876, 1916846,
+    ],
+    "0/11 1/20 25 40 43 2/143 155 3/20 4/275 931 1756 2648 5/1856 8173 6/3149 10474 7/149301 8/356900 548363 9/552300 868270",
+    "{\"0\":[11],\"1\":[20,25,40,43],\"2\":[143,155],\"3\":[20],\"4\":[275,931,1756,2648],\"5\":[1856,8173],\"6\":[3149,10474],\"7\":[149301],\"8\":[356900,548363],\"9\":[552300,868270]}",
+  )
+}
+
+///|
+test "moc oracle JSON cells-03" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii(
+    "0/11 1/20 25 40 43 2/143 155 3/20 4/275 931 1756 2648 5/1856 8173 6/3149 10474 7/149301 8/356900 548363 9/552300 868270",
+    limits,
+  )
+  let json = Moc::from_json(
+    "{\n  \"0\": [11],\n  \"1\": [20, 25, 40, 43],\n  \"2\": [143, 155],\n  \"3\": [20],\n  \"4\": [275, 931, 1756, 2648],\n  \"5\": [1856, 8173],\n  \"6\": [3149, 10474],\n  \"7\": [149301],\n  \"8\": [356900, 548363],\n  \"9\": [552300, 868270]\n}",
+    limits,
+  )
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle normalize cells-03" {
+  let limits = MocLimits::default()
+  let cells = [
+    Cell::new(Grid::from_level(1), 20),
+    Cell::new(Grid::from_level(3), 573),
+    Cell::new(Grid::from_level(2), 155),
+    Cell::new(Grid::from_level(6), 10474),
+    Cell::new(Grid::from_level(8), 356900),
+    Cell::new(Grid::from_level(1), 25),
+    Cell::new(Grid::from_level(3), 20),
+    Cell::new(Grid::from_level(4), 275),
+    Cell::new(Grid::from_level(9), 868270),
+    Cell::new(Grid::from_level(4), 2648),
+    Cell::new(Grid::from_level(5), 8173),
+    Cell::new(Grid::from_level(4), 931),
+    Cell::new(Grid::from_level(8), 548363),
+    Cell::new(Grid::from_level(2), 155),
+    Cell::new(Grid::from_level(6), 3149),
+    Cell::new(Grid::from_level(8), 331902),
+    Cell::new(Grid::from_level(7), 149301),
+    Cell::new(Grid::from_level(9), 552300),
+    Cell::new(Grid::from_level(2), 143),
+    Cell::new(Grid::from_level(1), 40),
+    Cell::new(Grid::from_level(1), 43),
+    Cell::new(Grid::from_level(4), 1756),
+    Cell::new(Grid::from_level(5), 1856),
+    Cell::new(Grid::from_level(2), 155),
+    Cell::new(Grid::from_level(0), 11),
+    Cell::new(Grid::from_level(7), 186167),
+  ]
+  let actual = Moc::from_cells(cells, 9, limits)
+  let expected = Moc::from_ascii(
+    "0/11 1/20 25 40 43 2/143 155 3/20 4/275 931 1756 2648 5/1856 8173 6/3149 10474 7/149301 8/356900 548363 9/552300 868270",
+    limits,
+  )
+  assert_true(actual.equals(expected))
+  assert_eq(actual.max_order(), expected.max_order())
+}
+
+///|
+test "moc oracle cells-04" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii(
+    "0/6-7 9-10 1/0-1 8 20 44 2/12 64 84 189 3/112 277 362 526 4/718 1240 5/3031 5044 6/8132 18564 21832 22168 36016 7/37980 90629 8/93251 153281 215746 381888 9/394156 446415 913598 958765 2227236",
+    limits,
+  )
+  moc_oracle_assert(
+    "cells-04",
+    actual,
+    9,
+    [
+      (0, 33554432),
+      (50331648, 54525952),
+      (95489024, 95490048),
+      (100903936, 100904192),
+      (114282240, 114282496),
+      (117440512, 118489088),
+      (133234688, 133251072),
+      (134217728, 150994944),
+      (155566080, 155570176),
+      (156959744, 156960768),
+      (188219392, 188481536),
+      (198639616, 198705152),
+      (220923904, 220924928),
+      (233881088, 233881344),
+      (245443840, 245444096),
+      (268435456, 272629760),
+      (290455552, 291504128),
+      (304152576, 304168960),
+      (325058560, 325320704),
+      (330563584, 330629120),
+      (335544320, 356515840),
+      (357695488, 357711872),
+      (363200512, 363216896),
+      (371216384, 371220480),
+      (379584512, 380633088),
+      (391053312, 391054336),
+      (402653184, 536870912),
+      (551550976, 552599552),
+      (570172416, 570172672),
+      (590086144, 590102528),
+      (603979776, 754974720),
+      (792723456, 796917760),
+    ],
+    [
+      10, 11, 13, 14, 16, 17, 24, 36, 60, 76, 128, 148, 253, 368, 533, 618, 782,
+      1742, 2264, 7127, 9140, 24516, 34948, 38216, 38552, 52400, 103516, 156165,
+      355395, 415425, 477890, 644032, 1442732, 1494991, 1962174, 2007341, 3275812,
+    ],
+    "0/6-7 9-10 1/0-1 8 20 44 2/12 64 84 189 3/112 277 362 526 4/718 1240 5/3031 5044 6/8132 18564 21832 22168 36016 7/37980 90629 8/93251 153281 215746 381888 9/394156 446415 913598 958765 2227236",
+    "{\"0\":[6,7,9,10],\"1\":[0,1,8,20,44],\"2\":[12,64,84,189],\"3\":[112,277,362,526],\"4\":[718,1240],\"5\":[3031,5044],\"6\":[8132,18564,21832,22168,36016],\"7\":[37980,90629],\"8\":[93251,153281,215746,381888],\"9\":[394156,446415,913598,958765,2227236]}",
+  )
+}
+
+///|
+test "moc oracle JSON cells-04" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii(
+    "0/6-7 9-10 1/0-1 8 20 44 2/12 64 84 189 3/112 277 362 526 4/718 1240 5/3031 5044 6/8132 18564 21832 22168 36016 7/37980 90629 8/93251 153281 215746 381888 9/394156 446415 913598 958765 2227236",
+    limits,
+  )
+  let json = Moc::from_json(
+    "{\n  \"0\": [6, 7, 9, 10],\n  \"1\": [0, 1, 8, 20, 44],\n  \"2\": [12, 64, 84, 189],\n  \"3\": [112, 277, 362, 526],\n  \"4\": [718, 1240],\n  \"5\": [3031, 5044],\n  \"6\": [8132, 18564, 21832, 22168, 36016],\n  \"7\": [37980, 90629],\n  \"8\": [93251, 153281, 215746, 381888],\n  \"9\": [394156, 446415, 913598, 958765, 2227236]\n}",
+    limits,
+  )
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle normalize cells-04" {
+  let limits = MocLimits::default()
+  let cells = [
+    Cell::new(Grid::from_level(0), 7),
+    Cell::new(Grid::from_level(2), 153),
+    Cell::new(Grid::from_level(1), 44),
+    Cell::new(Grid::from_level(2), 64),
+    Cell::new(Grid::from_level(2), 160),
+    Cell::new(Grid::from_level(6), 8132),
+    Cell::new(Grid::from_level(6), 36016),
+    Cell::new(Grid::from_level(2), 84),
+    Cell::new(Grid::from_level(9), 103810),
+    Cell::new(Grid::from_level(8), 93251),
+    Cell::new(Grid::from_level(1), 0),
+    Cell::new(Grid::from_level(1), 42),
+    Cell::new(Grid::from_level(4), 1240),
+    Cell::new(Grid::from_level(3), 526),
+    Cell::new(Grid::from_level(9), 958765),
+    Cell::new(Grid::from_level(8), 215746),
+    Cell::new(Grid::from_level(9), 555269),
+    Cell::new(Grid::from_level(6), 38571),
+    Cell::new(Grid::from_level(4), 718),
+    Cell::new(Grid::from_level(5), 5044),
+    Cell::new(Grid::from_level(8), 508288),
+    Cell::new(Grid::from_level(1), 44),
+    Cell::new(Grid::from_level(7), 37980),
+    Cell::new(Grid::from_level(8), 596120),
+    Cell::new(Grid::from_level(6), 38130),
+    Cell::new(Grid::from_level(6), 18564),
+    Cell::new(Grid::from_level(1), 38),
+    Cell::new(Grid::from_level(3), 277),
+    Cell::new(Grid::from_level(2), 189),
+    Cell::new(Grid::from_level(0), 10),
+    Cell::new(Grid::from_level(1), 39),
+    Cell::new(Grid::from_level(1), 8),
+    Cell::new(Grid::from_level(6), 3191),
+    Cell::new(Grid::from_level(0), 10),
+    Cell::new(Grid::from_level(6), 21832),
+    Cell::new(Grid::from_level(9), 913598),
+    Cell::new(Grid::from_level(8), 381888),
+    Cell::new(Grid::from_level(2), 12),
+    Cell::new(Grid::from_level(5), 9328),
+    Cell::new(Grid::from_level(9), 2227236),
+    Cell::new(Grid::from_level(4), 541),
+    Cell::new(Grid::from_level(9), 1690103),
+    Cell::new(Grid::from_level(6), 22168),
+    Cell::new(Grid::from_level(3), 637),
+    Cell::new(Grid::from_level(0), 6),
+    Cell::new(Grid::from_level(0), 9),
+    Cell::new(Grid::from_level(5), 9446),
+    Cell::new(Grid::from_level(0), 10),
+    Cell::new(Grid::from_level(5), 3031),
+    Cell::new(Grid::from_level(3), 705),
+    Cell::new(Grid::from_level(9), 446415),
+    Cell::new(Grid::from_level(1), 1),
+    Cell::new(Grid::from_level(3), 362),
+    Cell::new(Grid::from_level(7), 90629),
+    Cell::new(Grid::from_level(2), 33),
+    Cell::new(Grid::from_level(5), 507),
+    Cell::new(Grid::from_level(1), 20),
+    Cell::new(Grid::from_level(7), 84553),
+    Cell::new(Grid::from_level(8), 153281),
+    Cell::new(Grid::from_level(9), 394156),
+    Cell::new(Grid::from_level(3), 112),
+    Cell::new(Grid::from_level(4), 2619),
+    Cell::new(Grid::from_level(3), 437),
+  ]
+  let actual = Moc::from_cells(cells, 9, limits)
+  let expected = Moc::from_ascii(
+    "0/6-7 9-10 1/0-1 8 20 44 2/12 64 84 189 3/112 277 362 526 4/718 1240 5/3031 5044 6/8132 18564 21832 22168 36016 7/37980 90629 8/93251 153281 215746 381888 9/394156 446415 913598 958765 2227236",
+    limits,
+  )
+  assert_true(actual.equals(expected))
+  assert_eq(actual.max_order(), expected.max_order())
+}
+
+///|
+test "moc oracle cells-05" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii(
+    "0/8 2/82 3/34 4/986 1162 5/6659 6/8282 39644 7/23155 186135 8/620645 10/11096461 11357298 11/12221055 24785771 38970042 13/",
+    limits,
+  )
+  moc_oracle_assert(
+    "cells-05",
+    actual,
+    13,
+    [
+      (35651584, 36700160),
+      (94842880, 94846976),
+      (135692288, 135708672),
+      (195536880, 195536896),
+      (258473984, 258736128),
+      (304611328, 304873472),
+      (343932928, 348127232),
+      (396572336, 396572352),
+      (436404224, 436469760),
+      (536870912, 603979776),
+      (623520672, 623520688),
+      (635540480, 635541504),
+      (649527296, 649543680),
+      (710173504, 710173568),
+      (726867072, 726867136),
+      (762408960, 762413056),
+    ],
+    [
+      12, 146, 290, 2010, 2186, 10755, 24666, 56028, 88691, 251671, 882789, 15290765,
+      15551602, 28998271, 41562987, 55747258,
+    ],
+    "0/8 2/82 3/34 4/986 1162 5/6659 6/8282 39644 7/23155 186135 8/620645 10/11096461 11357298 11/12221055 24785771 38970042 13/",
+    "{\"0\":[8],\"2\":[82],\"3\":[34],\"4\":[986,1162],\"5\":[6659],\"6\":[8282,39644],\"7\":[23155,186135],\"8\":[620645],\"10\":[11096461,11357298],\"11\":[12221055,24785771,38970042],\"13\":[]}",
+  )
+}
+
+///|
+test "moc oracle JSON cells-05" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii(
+    "0/8 2/82 3/34 4/986 1162 5/6659 6/8282 39644 7/23155 186135 8/620645 10/11096461 11357298 11/12221055 24785771 38970042 13/",
+    limits,
+  )
+  let json = Moc::from_json(
+    "{\n  \"0\": [8],\n  \"2\": [82],\n  \"3\": [34],\n  \"4\": [986, 1162],\n  \"5\": [6659],\n  \"6\": [8282, 39644],\n  \"7\": [23155, 186135],\n  \"8\": [620645],\n  \"10\": [11096461, 11357298],\n  \"11\": [12221055, 24785771, 38970042],\n  \"13\": []\n}",
+    limits,
+  )
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle normalize cells-05" {
+  let limits = MocLimits::default()
+  let cells = [
+    Cell::new(Grid::from_level(11), 38970042),
+    Cell::new(Grid::from_level(11), 12221055),
+    Cell::new(Grid::from_level(11), 24785771),
+    Cell::new(Grid::from_level(10), 11096461),
+    Cell::new(Grid::from_level(7), 186135),
+    Cell::new(Grid::from_level(8), 620645),
+    Cell::new(Grid::from_level(4), 986),
+    Cell::new(Grid::from_level(4), 1162),
+    Cell::new(Grid::from_level(13), 565289175),
+    Cell::new(Grid::from_level(2), 82),
+    Cell::new(Grid::from_level(5), 6659),
+    Cell::new(Grid::from_level(6), 8282),
+    Cell::new(Grid::from_level(6), 39644),
+    Cell::new(Grid::from_level(7), 23155),
+    Cell::new(Grid::from_level(3), 34),
+    Cell::new(Grid::from_level(10), 11357298),
+    Cell::new(Grid::from_level(12), 146074807),
+    Cell::new(Grid::from_level(0), 8),
+  ]
+  let actual = Moc::from_cells(cells, 13, limits)
+  let expected = Moc::from_ascii(
+    "0/8 2/82 3/34 4/986 1162 5/6659 6/8282 39644 7/23155 186135 8/620645 10/11096461 11357298 11/12221055 24785771 38970042 13/",
+    limits,
+  )
+  assert_true(actual.equals(expected))
+  assert_eq(actual.max_order(), expected.max_order())
+}
+
+///|
+test "moc oracle cells-06" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii(
+    "0/5 9 4/957 2591 5/3651 8/39193 11/26922360 46154111 12/", limits,
+  )
+  moc_oracle_assert(
+    "cells-06",
+    actual,
+    12,
+    [
+      (40133632, 40134656),
+      (239271936, 239337472),
+      (250871808, 251133952),
+      (335544320, 402653184),
+      (430757760, 430757776),
+      (603979776, 671088640),
+      (679215104, 679477248),
+      (738465776, 738465792),
+    ],
+    [9, 13, 1981, 3615, 7747, 301337, 43699576, 62931327],
+    "0/5 9 4/957 2591 5/3651 8/39193 11/26922360 46154111 12/",
+    "{\"0\":[5,9],\"4\":[957,2591],\"5\":[3651],\"8\":[39193],\"11\":[26922360,46154111],\"12\":[]}",
+  )
+}
+
+///|
+test "moc oracle JSON cells-06" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii(
+    "0/5 9 4/957 2591 5/3651 8/39193 11/26922360 46154111 12/", limits,
+  )
+  let json = Moc::from_json(
+    "{\n  \"0\": [5, 9],\n  \"4\": [957, 2591],\n  \"5\": [3651],\n  \"8\": [39193],\n  \"11\": [26922360, 46154111],\n  \"12\": []\n}",
+    limits,
+  )
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle normalize cells-06" {
+  let limits = MocLimits::default()
+  let cells = [
+    Cell::new(Grid::from_level(0), 5),
+    Cell::new(Grid::from_level(0), 9),
+    Cell::new(Grid::from_level(8), 39193),
+    Cell::new(Grid::from_level(11), 26922360),
+    Cell::new(Grid::from_level(11), 46154111),
+    Cell::new(Grid::from_level(4), 2591),
+    Cell::new(Grid::from_level(5), 9266),
+    Cell::new(Grid::from_level(4), 957),
+    Cell::new(Grid::from_level(8), 356812),
+    Cell::new(Grid::from_level(5), 3651),
+  ]
+  let actual = Moc::from_cells(cells, 12, limits)
+  let expected = Moc::from_ascii(
+    "0/5 9 4/957 2591 5/3651 8/39193 11/26922360 46154111 12/", limits,
+  )
+  assert_true(actual.equals(expected))
+  assert_eq(actual.max_order(), expected.max_order())
+}
+
+///|
+test "moc oracle cells-07" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii("0/0 2-3 5-11 2/25 70 79 3/93 270", limits)
+  moc_oracle_assert(
+    "cells-07",
+    actual,
+    3,
+    [
+      (0, 67108864),
+      (97517568, 98566144),
+      (104857600, 109051904),
+      (134217728, 268435456),
+      (283115520, 284164096),
+      (293601280, 297795584),
+      (331350016, 805306368),
+    ],
+    [4, 6, 7, 9, 10, 11, 12, 13, 14, 15, 89, 134, 143, 349, 526],
+    "0/0 2-3 5-11 2/25 70 79 3/93 270",
+    "{\"0\":[0,2,3,5,6,7,8,9,10,11],\"2\":[25,70,79],\"3\":[93,270]}",
+  )
+}
+
+///|
+test "moc oracle JSON cells-07" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii("0/0 2-3 5-11 2/25 70 79 3/93 270", limits)
+  let json = Moc::from_json(
+    "{\n  \"0\": [0, 2, 3, 5, 6, 7, 8, 9, 10, 11],\n  \"2\": [25, 70, 79],\n  \"3\": [93, 270]\n}",
+    limits,
+  )
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle normalize cells-07" {
+  let limits = MocLimits::default()
+  let cells = [
+    Cell::new(Grid::from_level(0), 0),
+    Cell::new(Grid::from_level(0), 5),
+    Cell::new(Grid::from_level(3), 317),
+    Cell::new(Grid::from_level(1), 25),
+    Cell::new(Grid::from_level(2), 117),
+    Cell::new(Grid::from_level(1), 46),
+    Cell::new(Grid::from_level(3), 640),
+    Cell::new(Grid::from_level(2), 6),
+    Cell::new(Grid::from_level(0), 6),
+    Cell::new(Grid::from_level(3), 640),
+    Cell::new(Grid::from_level(2), 6),
+    Cell::new(Grid::from_level(2), 95),
+    Cell::new(Grid::from_level(2), 70),
+    Cell::new(Grid::from_level(3), 428),
+    Cell::new(Grid::from_level(2), 84),
+    Cell::new(Grid::from_level(1), 36),
+    Cell::new(Grid::from_level(0), 6),
+    Cell::new(Grid::from_level(2), 114),
+    Cell::new(Grid::from_level(2), 123),
+    Cell::new(Grid::from_level(0), 3),
+    Cell::new(Grid::from_level(0), 2),
+    Cell::new(Grid::from_level(1), 41),
+    Cell::new(Grid::from_level(1), 44),
+    Cell::new(Grid::from_level(1), 44),
+    Cell::new(Grid::from_level(3), 93),
+    Cell::new(Grid::from_level(1), 27),
+    Cell::new(Grid::from_level(0), 9),
+    Cell::new(Grid::from_level(2), 5),
+    Cell::new(Grid::from_level(0), 10),
+    Cell::new(Grid::from_level(3), 595),
+    Cell::new(Grid::from_level(2), 79),
+    Cell::new(Grid::from_level(2), 57),
+    Cell::new(Grid::from_level(3), 429),
+    Cell::new(Grid::from_level(1), 43),
+    Cell::new(Grid::from_level(2), 54),
+    Cell::new(Grid::from_level(1), 37),
+    Cell::new(Grid::from_level(2), 190),
+    Cell::new(Grid::from_level(0), 6),
+    Cell::new(Grid::from_level(2), 32),
+    Cell::new(Grid::from_level(0), 2),
+    Cell::new(Grid::from_level(2), 182),
+    Cell::new(Grid::from_level(1), 0),
+    Cell::new(Grid::from_level(2), 41),
+    Cell::new(Grid::from_level(1), 8),
+    Cell::new(Grid::from_level(2), 132),
+    Cell::new(Grid::from_level(1), 47),
+    Cell::new(Grid::from_level(0), 8),
+    Cell::new(Grid::from_level(0), 7),
+    Cell::new(Grid::from_level(3), 270),
+    Cell::new(Grid::from_level(1), 12),
+    Cell::new(Grid::from_level(2), 25),
+    Cell::new(Grid::from_level(0), 10),
+    Cell::new(Grid::from_level(3), 199),
+    Cell::new(Grid::from_level(0), 0),
+    Cell::new(Grid::from_level(2), 13),
+    Cell::new(Grid::from_level(2), 130),
+    Cell::new(Grid::from_level(0), 0),
+    Cell::new(Grid::from_level(3), 588),
+    Cell::new(Grid::from_level(0), 0),
+    Cell::new(Grid::from_level(0), 11),
+    Cell::new(Grid::from_level(1), 26),
+    Cell::new(Grid::from_level(3), 389),
+    Cell::new(Grid::from_level(1), 0),
+  ]
+  let actual = Moc::from_cells(cells, 3, limits)
+  let expected = Moc::from_ascii("0/0 2-3 5-11 2/25 70 79 3/93 270", limits)
+  assert_true(actual.equals(expected))
+  assert_eq(actual.max_order(), expected.max_order())
+}
+
+///|
+test "moc oracle cells-08" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii("2/111 5/6427 6/11435 21646 8/50434", limits)
+  moc_oracle_assert(
+    "cells-08",
+    actual,
+    8,
+    [
+      (51644416, 51645440),
+      (187351040, 187367424),
+      (354648064, 354664448),
+      (421199872, 421265408),
+      (465567744, 469762048),
+    ],
+    [175, 10523, 27819, 38030, 312578],
+    "2/111 5/6427 6/11435 21646 8/50434",
+    "{\"2\":[111],\"5\":[6427],\"6\":[11435,21646],\"8\":[50434]}",
+  )
+}
+
+///|
+test "moc oracle JSON cells-08" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii("2/111 5/6427 6/11435 21646 8/50434", limits)
+  let json = Moc::from_json(
+    "{\n  \"2\": [111],\n  \"5\": [6427],\n  \"6\": [11435, 21646],\n  \"8\": [50434]\n}",
+    limits,
+  )
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle normalize cells-08" {
+  let limits = MocLimits::default()
+  let cells = [
+    Cell::new(Grid::from_level(6), 11435),
+    Cell::new(Grid::from_level(5), 6427),
+    Cell::new(Grid::from_level(8), 50434),
+    Cell::new(Grid::from_level(6), 21646),
+    Cell::new(Grid::from_level(2), 111),
+  ]
+  let actual = Moc::from_cells(cells, 8, limits)
+  let expected = Moc::from_ascii("2/111 5/6427 6/11435 21646 8/50434", limits)
+  assert_true(actual.equals(expected))
+  assert_eq(actual.max_order(), expected.max_order())
+}
+
+///|
+test "moc oracle cells-09" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii("0/0-11", limits)
+  moc_oracle_assert(
+    "cells-09",
+    actual,
+    0,
+    [(0, 805306368)],
+    [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+    "0/0-11",
+    "{\"0\":[0,1,2,3,4,5,6,7,8,9,10,11]}",
+  )
+}
+
+///|
+test "moc oracle JSON cells-09" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii("0/0-11", limits)
+  let json = Moc::from_json(
+    "{\n  \"0\": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]\n}", limits,
+  )
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle normalize cells-09" {
+  let limits = MocLimits::default()
+  let cells = [
+    Cell::new(Grid::from_level(0), 6),
+    Cell::new(Grid::from_level(0), 9),
+    Cell::new(Grid::from_level(0), 3),
+    Cell::new(Grid::from_level(0), 5),
+    Cell::new(Grid::from_level(0), 3),
+    Cell::new(Grid::from_level(0), 5),
+    Cell::new(Grid::from_level(0), 6),
+    Cell::new(Grid::from_level(0), 2),
+    Cell::new(Grid::from_level(0), 0),
+    Cell::new(Grid::from_level(0), 0),
+    Cell::new(Grid::from_level(0), 6),
+    Cell::new(Grid::from_level(0), 8),
+    Cell::new(Grid::from_level(0), 6),
+    Cell::new(Grid::from_level(0), 6),
+    Cell::new(Grid::from_level(0), 9),
+    Cell::new(Grid::from_level(0), 11),
+    Cell::new(Grid::from_level(0), 9),
+    Cell::new(Grid::from_level(0), 10),
+    Cell::new(Grid::from_level(0), 10),
+    Cell::new(Grid::from_level(0), 9),
+    Cell::new(Grid::from_level(0), 5),
+    Cell::new(Grid::from_level(0), 2),
+    Cell::new(Grid::from_level(0), 9),
+    Cell::new(Grid::from_level(0), 6),
+    Cell::new(Grid::from_level(0), 2),
+    Cell::new(Grid::from_level(0), 2),
+    Cell::new(Grid::from_level(0), 7),
+    Cell::new(Grid::from_level(0), 4),
+    Cell::new(Grid::from_level(0), 9),
+    Cell::new(Grid::from_level(0), 11),
+    Cell::new(Grid::from_level(0), 11),
+    Cell::new(Grid::from_level(0), 8),
+    Cell::new(Grid::from_level(0), 8),
+    Cell::new(Grid::from_level(0), 7),
+    Cell::new(Grid::from_level(0), 8),
+    Cell::new(Grid::from_level(0), 5),
+    Cell::new(Grid::from_level(0), 3),
+    Cell::new(Grid::from_level(0), 1),
+    Cell::new(Grid::from_level(0), 11),
+    Cell::new(Grid::from_level(0), 3),
+    Cell::new(Grid::from_level(0), 7),
+    Cell::new(Grid::from_level(0), 1),
+    Cell::new(Grid::from_level(0), 6),
+    Cell::new(Grid::from_level(0), 3),
+    Cell::new(Grid::from_level(0), 11),
+    Cell::new(Grid::from_level(0), 2),
+    Cell::new(Grid::from_level(0), 1),
+    Cell::new(Grid::from_level(0), 2),
+    Cell::new(Grid::from_level(0), 8),
+    Cell::new(Grid::from_level(0), 11),
+    Cell::new(Grid::from_level(0), 8),
+    Cell::new(Grid::from_level(0), 4),
+    Cell::new(Grid::from_level(0), 7),
+    Cell::new(Grid::from_level(0), 0),
+    Cell::new(Grid::from_level(0), 6),
+    Cell::new(Grid::from_level(0), 6),
+    Cell::new(Grid::from_level(0), 0),
+    Cell::new(Grid::from_level(0), 4),
+    Cell::new(Grid::from_level(0), 8),
+    Cell::new(Grid::from_level(0), 3),
+    Cell::new(Grid::from_level(0), 5),
+  ]
+  let actual = Moc::from_cells(cells, 0, limits)
+  let expected = Moc::from_ascii("0/0-11", limits)
+  assert_true(actual.equals(expected))
+  assert_eq(actual.max_order(), expected.max_order())
+}
+
+///|
+test "moc oracle cells-10" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii("0/3 6 1/3-5 22 34 36 2/29 73 161", limits)
+  moc_oracle_assert(
+    "cells-10",
+    actual,
+    2,
+    [
+      (50331648, 100663296),
+      (121634816, 125829120),
+      (201326592, 268435456),
+      (306184192, 310378496),
+      (369098752, 385875968),
+      (402653184, 469762048),
+      (570425344, 587202560),
+      (603979776, 620756992),
+      (675282944, 679477248),
+    ],
+    [7, 10, 19, 20, 21, 38, 50, 52, 93, 137, 225],
+    "0/3 6 1/3-5 22 34 36 2/29 73 161",
+    "{\"0\":[3,6],\"1\":[3,4,5,22,34,36],\"2\":[29,73,161]}",
+  )
+}
+
+///|
+test "moc oracle JSON cells-10" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii("0/3 6 1/3-5 22 34 36 2/29 73 161", limits)
+  let json = Moc::from_json(
+    "{\n  \"0\": [3, 6],\n  \"1\": [3, 4, 5, 22, 34, 36],\n  \"2\": [29, 73, 161]\n}",
+    limits,
+  )
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle normalize cells-10" {
+  let limits = MocLimits::default()
+  let cells = [
+    Cell::new(Grid::from_level(2), 29),
+    Cell::new(Grid::from_level(1), 5),
+    Cell::new(Grid::from_level(2), 22),
+    Cell::new(Grid::from_level(1), 36),
+    Cell::new(Grid::from_level(2), 161),
+    Cell::new(Grid::from_level(2), 73),
+    Cell::new(Grid::from_level(1), 4),
+    Cell::new(Grid::from_level(1), 34),
+    Cell::new(Grid::from_level(0), 6),
+    Cell::new(Grid::from_level(2), 17),
+    Cell::new(Grid::from_level(1), 22),
+    Cell::new(Grid::from_level(1), 3),
+    Cell::new(Grid::from_level(0), 3),
+  ]
+  let actual = Moc::from_cells(cells, 2, limits)
+  let expected = Moc::from_ascii("0/3 6 1/3-5 22 34 36 2/29 73 161", limits)
+  assert_true(actual.equals(expected))
+  assert_eq(actual.max_order(), expected.max_order())
+}
+
+///|
+test "moc oracle cells-11" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii(
+    "0/0 7 9 11 1/9 41-42 2/62 3/396 4/491 684 749 1748 2079 2759 5/5911 6/9179 13462 13602 24068 34251 34426 7/87928 91166 167405 8/218226 287478 9/869986 1378064 1785440 10/4980468 11/15255035 20116959",
+    limits,
+  )
+  moc_oracle_assert(
+    "cells-11",
+    actual,
+    11,
+    [
+      (0, 67108864),
+      (128712704, 128974848),
+      (150388736, 150405120),
+      (150994944, 167772160),
+      (179306496, 179568640),
+      (196345856, 196608000),
+      (220561408, 220577792),
+      (222716416, 222716672),
+      (222855168, 222871552),
+      (223463424, 223464448),
+      (244080560, 244080576),
+      (260046848, 264241152),
+      (294377472, 294378496),
+      (318749952, 318750016),
+      (321871344, 321871360),
+      (352784384, 352784640),
+      (360153088, 360157184),
+      (373415936, 373420032),
+      (387383296, 387448832),
+      (394330112, 394346496),
+      (415236096, 416284672),
+      (457072640, 457072896),
+      (458227712, 458489856),
+      (469762048, 536870912),
+      (544997376, 545259520),
+      (561168384, 561184768),
+      (564035584, 564051968),
+      (603979776, 671088640),
+      (685690880, 685694976),
+      (687865856, 721420288),
+      (723255296, 723517440),
+      (738197504, 805306368),
+    ],
+    [
+      4, 11, 13, 15, 25, 57, 58, 126, 652, 1515, 1708, 1773, 2772, 3103, 3783, 10007,
+      25563, 29846, 29986, 40452, 50635, 50810, 153464, 156702, 232941, 480370, 549622,
+      1918562, 2426640, 2834016, 9174772, 32032251, 36894175,
+    ],
+    "0/0 7 9 11 1/9 41-42 2/62 3/396 4/491 684 749 1748 2079 2759 5/5911 6/9179 13462 13602 24068 34251 34426 7/87928 91166 167405 8/218226 287478 9/869986 1378064 1785440 10/4980468 11/15255035 20116959",
+    "{\"0\":[0,7,9,11],\"1\":[9,41,42],\"2\":[62],\"3\":[396],\"4\":[491,684,749,1748,2079,2759],\"5\":[5911],\"6\":[9179,13462,13602,24068,34251,34426],\"7\":[87928,91166,167405],\"8\":[218226,287478],\"9\":[869986,1378064,1785440],\"10\":[4980468],\"11\":[15255035,20116959]}",
+  )
+}
+
+///|
+test "moc oracle JSON cells-11" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii(
+    "0/0 7 9 11 1/9 41-42 2/62 3/396 4/491 684 749 1748 2079 2759 5/5911 6/9179 13462 13602 24068 34251 34426 7/87928 91166 167405 8/218226 287478 9/869986 1378064 1785440 10/4980468 11/15255035 20116959",
+    limits,
+  )
+  let json = Moc::from_json(
+    "{\n  \"0\": [0, 7, 9, 11],\n  \"1\": [9, 41, 42],\n  \"2\": [62],\n  \"3\": [396],\n  \"4\": [491, 684, 749, 1748, 2079, 2759],\n  \"5\": [5911],\n  \"6\": [9179, 13462, 13602, 24068, 34251, 34426],\n  \"7\": [87928, 91166, 167405],\n  \"8\": [218226, 287478],\n  \"9\": [869986, 1378064, 1785440],\n  \"10\": [4980468],\n  \"11\": [15255035, 20116959]\n}",
+    limits,
+  )
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle normalize cells-11" {
+  let limits = MocLimits::default()
+  let cells = [
+    Cell::new(Grid::from_level(7), 38311),
+    Cell::new(Grid::from_level(7), 160906),
+    Cell::new(Grid::from_level(7), 160962),
+    Cell::new(Grid::from_level(8), 52832),
+    Cell::new(Grid::from_level(4), 749),
+    Cell::new(Grid::from_level(8), 727768),
+    Cell::new(Grid::from_level(5), 9366),
+    Cell::new(Grid::from_level(4), 211),
+    Cell::new(Grid::from_level(4), 2376),
+    Cell::new(Grid::from_level(6), 9179),
+    Cell::new(Grid::from_level(1), 42),
+    Cell::new(Grid::from_level(7), 87928),
+    Cell::new(Grid::from_level(9), 869986),
+    Cell::new(Grid::from_level(4), 491),
+    Cell::new(Grid::from_level(6), 34251),
+    Cell::new(Grid::from_level(7), 167405),
+    Cell::new(Grid::from_level(7), 91166),
+    Cell::new(Grid::from_level(10), 4980468),
+    Cell::new(Grid::from_level(11), 15255035),
+    Cell::new(Grid::from_level(4), 2759),
+    Cell::new(Grid::from_level(7), 152616),
+    Cell::new(Grid::from_level(4), 684),
+    Cell::new(Grid::from_level(1), 41),
+    Cell::new(Grid::from_level(5), 5911),
+    Cell::new(Grid::from_level(8), 45741),
+    Cell::new(Grid::from_level(8), 597214),
+    Cell::new(Grid::from_level(2), 10),
+    Cell::new(Grid::from_level(0), 7),
+    Cell::new(Grid::from_level(4), 2079),
+    Cell::new(Grid::from_level(1), 29),
+    Cell::new(Grid::from_level(9), 1785440),
+    Cell::new(Grid::from_level(4), 0),
+    Cell::new(Grid::from_level(0), 11),
+    Cell::new(Grid::from_level(1), 9),
+    Cell::new(Grid::from_level(2), 62),
+    Cell::new(Grid::from_level(8), 287478),
+    Cell::new(Grid::from_level(6), 13602),
+    Cell::new(Grid::from_level(0), 0),
+    Cell::new(Grid::from_level(0), 11),
+    Cell::new(Grid::from_level(5), 275),
+    Cell::new(Grid::from_level(6), 13462),
+    Cell::new(Grid::from_level(6), 24068),
+    Cell::new(Grid::from_level(0), 9),
+    Cell::new(Grid::from_level(9), 1378064),
+    Cell::new(Grid::from_level(6), 34426),
+    Cell::new(Grid::from_level(10), 11912652),
+    Cell::new(Grid::from_level(6), 3084),
+    Cell::new(Grid::from_level(0), 11),
+    Cell::new(Grid::from_level(8), 218226),
+    Cell::new(Grid::from_level(8), 486572),
+    Cell::new(Grid::from_level(4), 38),
+    Cell::new(Grid::from_level(1), 31),
+    Cell::new(Grid::from_level(4), 1748),
+    Cell::new(Grid::from_level(11), 20116959),
+    Cell::new(Grid::from_level(3), 396),
+  ]
+  let actual = Moc::from_cells(cells, 11, limits)
+  let expected = Moc::from_ascii(
+    "0/0 7 9 11 1/9 41-42 2/62 3/396 4/491 684 749 1748 2079 2759 5/5911 6/9179 13462 13602 24068 34251 34426 7/87928 91166 167405 8/218226 287478 9/869986 1378064 1785440 10/4980468 11/15255035 20116959",
+    limits,
+  )
+  assert_true(actual.equals(expected))
+  assert_eq(actual.max_order(), expected.max_order())
+}
+
+///|
+test "moc oracle cells-12" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii(
+    "0/0 6 9-10 1/8 13 18 2/44 125 134 3/487 4/1850 5/6122 6/15761 7/40590 41469 134274 8/187676 9/813247 2149431 10/4375623 7888846 11560550 12344985 11/8092308 20958575 32053630 37149684 12/22983612 23713773 118004316 195851922",
+    limits,
+  )
+  moc_oracle_assert(
+    "cells-12",
+    actual,
+    12,
+    [
+      (0, 67108864),
+      (91934448, 91934452),
+      (94855092, 94855096),
+      (129476928, 129476944),
+      (134217728, 150994944),
+      (166256640, 166260736),
+      (169857024, 169861120),
+      (184549376, 188743680),
+      (192180224, 192181248),
+      (208191232, 208191488),
+      (218103808, 234881024),
+      (258228224, 258244608),
+      (280039872, 280039936),
+      (301989888, 318767104),
+      (335337200, 335337216),
+      (401211392, 401276928),
+      (402653184, 469762048),
+      (472017264, 472017268),
+      (484966400, 485228544),
+      (504886144, 504886208),
+      (510656512, 511705088),
+      (512858080, 512858096),
+      (524288000, 528482304),
+      (549986304, 549990400),
+      (550254336, 550254592),
+      (562036736, 566231040),
+      (594394944, 594394960),
+      (603979776, 738197504),
+      (739875200, 739875264),
+      (783407688, 783407692),
+      (790079040, 790079104),
+    ],
+    [
+      4, 10, 13, 14, 24, 29, 34, 108, 189, 198, 743, 2874, 10218, 32145, 106126,
+      107005, 199810, 449820, 1861823, 3198007, 8569927, 12083150, 15754854, 16539289,
+      24869524, 37735791, 48830846, 53926900, 90092476, 90822637, 185113180, 262960786,
+    ],
+    "0/0 6 9-10 1/8 13 18 2/44 125 134 3/487 4/1850 5/6122 6/15761 7/40590 41469 134274 8/187676 9/813247 2149431 10/4375623 7888846 11560550 12344985 11/8092308 20958575 32053630 37149684 12/22983612 23713773 118004316 195851922",
+    "{\"0\":[0,6,9,10],\"1\":[8,13,18],\"2\":[44,125,134],\"3\":[487],\"4\":[1850],\"5\":[6122],\"6\":[15761],\"7\":[40590,41469,134274],\"8\":[187676],\"9\":[813247,2149431],\"10\":[4375623,7888846,11560550,12344985],\"11\":[8092308,20958575,32053630,37149684],\"12\":[22983612,23713773,118004316,195851922]}",
+  )
+}
+
+///|
+test "moc oracle JSON cells-12" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii(
+    "0/0 6 9-10 1/8 13 18 2/44 125 134 3/487 4/1850 5/6122 6/15761 7/40590 41469 134274 8/187676 9/813247 2149431 10/4375623 7888846 11560550 12344985 11/8092308 20958575 32053630 37149684 12/22983612 23713773 118004316 195851922",
+    limits,
+  )
+  let json = Moc::from_json(
+    "{\n  \"0\": [0, 6, 9, 10],\n  \"1\": [8, 13, 18],\n  \"2\": [44, 125, 134],\n  \"3\": [487],\n  \"4\": [1850],\n  \"5\": [6122],\n  \"6\": [15761],\n  \"7\": [40590, 41469, 134274],\n  \"8\": [187676],\n  \"9\": [813247, 2149431],\n  \"10\": [4375623, 7888846, 11560550, 12344985],\n  \"11\": [8092308, 20958575, 32053630, 37149684],\n  \"12\": [22983612, 23713773, 118004316, 195851922]\n}",
+    limits,
+  )
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle normalize cells-12" {
+  let limits = MocLimits::default()
+  let cells = [
+    Cell::new(Grid::from_level(12), 195851922),
+    Cell::new(Grid::from_level(6), 25916),
+    Cell::new(Grid::from_level(10), 11560550),
+    Cell::new(Grid::from_level(5), 6976),
+    Cell::new(Grid::from_level(0), 9),
+    Cell::new(Grid::from_level(2), 125),
+    Cell::new(Grid::from_level(0), 0),
+    Cell::new(Grid::from_level(0), 10),
+    Cell::new(Grid::from_level(9), 813247),
+    Cell::new(Grid::from_level(0), 6),
+    Cell::new(Grid::from_level(7), 41469),
+    Cell::new(Grid::from_level(11), 37149684),
+    Cell::new(Grid::from_level(1), 18),
+    Cell::new(Grid::from_level(2), 44),
+    Cell::new(Grid::from_level(2), 134),
+    Cell::new(Grid::from_level(12), 23713773),
+    Cell::new(Grid::from_level(10), 6916236),
+    Cell::new(Grid::from_level(8), 187676),
+    Cell::new(Grid::from_level(9), 1823533),
+    Cell::new(Grid::from_level(1), 8),
+    Cell::new(Grid::from_level(8), 402681),
+    Cell::new(Grid::from_level(7), 40590),
+    Cell::new(Grid::from_level(1), 37),
+    Cell::new(Grid::from_level(4), 1850),
+    Cell::new(Grid::from_level(0), 0),
+    Cell::new(Grid::from_level(3), 420),
+    Cell::new(Grid::from_level(10), 12344985),
+    Cell::new(Grid::from_level(9), 2149431),
+    Cell::new(Grid::from_level(11), 8092308),
+    Cell::new(Grid::from_level(5), 6122),
+    Cell::new(Grid::from_level(11), 20958575),
+    Cell::new(Grid::from_level(11), 39227260),
+    Cell::new(Grid::from_level(3), 487),
+    Cell::new(Grid::from_level(7), 134274),
+    Cell::new(Grid::from_level(1), 13),
+    Cell::new(Grid::from_level(4), 713),
+    Cell::new(Grid::from_level(12), 22983612),
+    Cell::new(Grid::from_level(12), 118004316),
+    Cell::new(Grid::from_level(2), 13),
+    Cell::new(Grid::from_level(10), 7888846),
+    Cell::new(Grid::from_level(6), 15761),
+    Cell::new(Grid::from_level(11), 32053630),
+    Cell::new(Grid::from_level(10), 4375623),
+  ]
+  let actual = Moc::from_cells(cells, 12, limits)
+  let expected = Moc::from_ascii(
+    "0/0 6 9-10 1/8 13 18 2/44 125 134 3/487 4/1850 5/6122 6/15761 7/40590 41469 134274 8/187676 9/813247 2149431 10/4375623 7888846 11560550 12344985 11/8092308 20958575 32053630 37149684 12/22983612 23713773 118004316 195851922",
+    limits,
+  )
+  assert_true(actual.equals(expected))
+  assert_eq(actual.max_order(), expected.max_order())
+}
+
+///|
+test "moc oracle cells-13" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii(
+    "0/0-2 4 6 8 10 1/14-15 20 28 44 46 2/50-51 156 4/1417 2360 2521 2885 2907",
+    limits,
+  )
+  moc_oracle_assert(
+    "cells-13",
+    actual,
+    4,
+    [
+      (0, 201326592),
+      (209715200, 218103808),
+      (234881024, 352321536),
+      (371458048, 371720192),
+      (402653184, 486539264),
+      (536870912, 603979776),
+      (618659840, 618921984),
+      (654311424, 658505728),
+      (660865024, 661127168),
+      (671088640, 754974720),
+      (756285440, 756547584),
+      (762052608, 762314752),
+      (771751936, 788529152),
+    ],
+    [
+      4, 5, 6, 8, 10, 12, 14, 30, 31, 36, 44, 60, 62, 114, 115, 220, 2441, 3384,
+      3545, 3909, 3931,
+    ],
+    "0/0-2 4 6 8 10 1/14-15 20 28 44 46 2/50-51 156 4/1417 2360 2521 2885 2907",
+    "{\"0\":[0,1,2,4,6,8,10],\"1\":[14,15,20,28,44,46],\"2\":[50,51,156],\"4\":[1417,2360,2521,2885,2907]}",
+  )
+}
+
+///|
+test "moc oracle JSON cells-13" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii(
+    "0/0-2 4 6 8 10 1/14-15 20 28 44 46 2/50-51 156 4/1417 2360 2521 2885 2907",
+    limits,
+  )
+  let json = Moc::from_json(
+    "{\n  \"0\": [0, 1, 2, 4, 6, 8, 10],\n  \"1\": [14, 15, 20, 28, 44, 46],\n  \"2\": [50, 51, 156],\n  \"4\": [1417, 2360, 2521, 2885, 2907]\n}",
+    limits,
+  )
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle normalize cells-13" {
+  let limits = MocLimits::default()
+  let cells = [
+    Cell::new(Grid::from_level(0), 10),
+    Cell::new(Grid::from_level(3), 2),
+    Cell::new(Grid::from_level(0), 6),
+    Cell::new(Grid::from_level(4), 2729),
+    Cell::new(Grid::from_level(2), 12),
+    Cell::new(Grid::from_level(1), 28),
+    Cell::new(Grid::from_level(0), 0),
+    Cell::new(Grid::from_level(1), 8),
+    Cell::new(Grid::from_level(2), 156),
+    Cell::new(Grid::from_level(0), 8),
+    Cell::new(Grid::from_level(0), 0),
+    Cell::new(Grid::from_level(2), 128),
+    Cell::new(Grid::from_level(2), 111),
+    Cell::new(Grid::from_level(3), 147),
+    Cell::new(Grid::from_level(4), 966),
+    Cell::new(Grid::from_level(3), 445),
+    Cell::new(Grid::from_level(1), 8),
+    Cell::new(Grid::from_level(1), 20),
+    Cell::new(Grid::from_level(1), 44),
+    Cell::new(Grid::from_level(1), 46),
+    Cell::new(Grid::from_level(4), 2521),
+    Cell::new(Grid::from_level(2), 170),
+    Cell::new(Grid::from_level(3), 677),
+    Cell::new(Grid::from_level(0), 1),
+    Cell::new(Grid::from_level(4), 2885),
+    Cell::new(Grid::from_level(1), 15),
+    Cell::new(Grid::from_level(2), 19),
+    Cell::new(Grid::from_level(1), 35),
+    Cell::new(Grid::from_level(4), 800),
+    Cell::new(Grid::from_level(1), 34),
+    Cell::new(Grid::from_level(4), 2907),
+    Cell::new(Grid::from_level(3), 224),
+    Cell::new(Grid::from_level(1), 8),
+    Cell::new(Grid::from_level(1), 27),
+    Cell::new(Grid::from_level(3), 323),
+    Cell::new(Grid::from_level(1), 27),
+    Cell::new(Grid::from_level(4), 2659),
+    Cell::new(Grid::from_level(2), 4),
+    Cell::new(Grid::from_level(2), 9),
+    Cell::new(Grid::from_level(0), 2),
+    Cell::new(Grid::from_level(1), 32),
+    Cell::new(Grid::from_level(1), 14),
+    Cell::new(Grid::from_level(4), 1601),
+    Cell::new(Grid::from_level(2), 51),
+    Cell::new(Grid::from_level(0), 4),
+    Cell::new(Grid::from_level(1), 3),
+    Cell::new(Grid::from_level(4), 2360),
+    Cell::new(Grid::from_level(4), 4),
+    Cell::new(Grid::from_level(2), 50),
+    Cell::new(Grid::from_level(2), 60),
+    Cell::new(Grid::from_level(2), 35),
+    Cell::new(Grid::from_level(0), 10),
+    Cell::new(Grid::from_level(1), 24),
+    Cell::new(Grid::from_level(0), 4),
+    Cell::new(Grid::from_level(4), 1417),
+  ]
+  let actual = Moc::from_cells(cells, 4, limits)
+  let expected = Moc::from_ascii(
+    "0/0-2 4 6 8 10 1/14-15 20 28 44 46 2/50-51 156 4/1417 2360 2521 2885 2907",
+    limits,
+  )
+  assert_true(actual.equals(expected))
+  assert_eq(actual.max_order(), expected.max_order())
+}
+
+///|
+test "moc oracle cells-14" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii(
+    "1/19 2/16 141 3/128 284 4/446 787 2967 3028 5/6605 11606", limits,
+  )
+  moc_oracle_assert(
+    "cells-14",
+    actual,
+    5,
+    [
+      (67108864, 71303168),
+      (116916224, 117178368),
+      (134217728, 135266304),
+      (206307328, 206569472),
+      (297795584, 298844160),
+      (318767104, 335544320),
+      (432865280, 432930816),
+      (591396864, 595591168),
+      (760610816, 760676352),
+      (777781248, 778043392),
+      (793772032, 794034176),
+    ],
+    [35, 80, 205, 384, 540, 1470, 1811, 3991, 4052, 10701, 15702],
+    "1/19 2/16 141 3/128 284 4/446 787 2967 3028 5/6605 11606",
+    "{\"1\":[19],\"2\":[16,141],\"3\":[128,284],\"4\":[446,787,2967,3028],\"5\":[6605,11606]}",
+  )
+}
+
+///|
+test "moc oracle JSON cells-14" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii(
+    "1/19 2/16 141 3/128 284 4/446 787 2967 3028 5/6605 11606", limits,
+  )
+  let json = Moc::from_json(
+    "{\n  \"1\": [19],\n  \"2\": [16, 141],\n  \"3\": [128, 284],\n  \"4\": [446, 787, 2967, 3028],\n  \"5\": [6605, 11606]\n}",
+    limits,
+  )
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle normalize cells-14" {
+  let limits = MocLimits::default()
+  let cells = [
+    Cell::new(Grid::from_level(4), 787),
+    Cell::new(Grid::from_level(5), 11606),
+    Cell::new(Grid::from_level(4), 2967),
+    Cell::new(Grid::from_level(2), 16),
+    Cell::new(Grid::from_level(3), 128),
+    Cell::new(Grid::from_level(3), 284),
+    Cell::new(Grid::from_level(2), 141),
+    Cell::new(Grid::from_level(4), 3028),
+    Cell::new(Grid::from_level(5), 6605),
+    Cell::new(Grid::from_level(4), 446),
+    Cell::new(Grid::from_level(1), 19),
+  ]
+  let actual = Moc::from_cells(cells, 5, limits)
+  let expected = Moc::from_ascii(
+    "1/19 2/16 141 3/128 284 4/446 787 2967 3028 5/6605 11606", limits,
+  )
+  assert_true(actual.equals(expected))
+  assert_eq(actual.max_order(), expected.max_order())
+}
+
+///|
+test "moc oracle cells-15" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii(
+    "0/0-1 4 9 11 1/11 14 23 2/135 5/3871 5302 6847 7619 10470 10524 6/14240 7/115983 9/1685367 2775070",
+    limits,
+  )
+  moc_oracle_assert(
+    "cells-15",
+    actual,
+    9,
+    [
+      (0, 134217728),
+      (184549376, 201326592),
+      (233308160, 233324544),
+      (234881024, 251658240),
+      (253689856, 253755392),
+      (268435456, 335544320),
+      (347471872, 347537408),
+      (385875968, 402653184),
+      (431453952, 431454208),
+      (448724992, 448790528),
+      (475066368, 475070464),
+      (499318784, 499384320),
+      (566231040, 570425344),
+      (603979776, 671088640),
+      (686161920, 686227456),
+      (689700864, 689766400),
+      (710417920, 710418176),
+      (738197504, 805306368),
+    ],
+    [
+      4, 5, 8, 13, 15, 27, 30, 39, 199, 7967, 9398, 10943, 11715, 14566, 14620, 30624,
+      181519, 2733943, 3823646,
+    ],
+    "0/0-1 4 9 11 1/11 14 23 2/135 5/3871 5302 6847 7619 10470 10524 6/14240 7/115983 9/1685367 2775070",
+    "{\"0\":[0,1,4,9,11],\"1\":[11,14,23],\"2\":[135],\"5\":[3871,5302,6847,7619,10470,10524],\"6\":[14240],\"7\":[115983],\"9\":[1685367,2775070]}",
+  )
+}
+
+///|
+test "moc oracle JSON cells-15" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii(
+    "0/0-1 4 9 11 1/11 14 23 2/135 5/3871 5302 6847 7619 10470 10524 6/14240 7/115983 9/1685367 2775070",
+    limits,
+  )
+  let json = Moc::from_json(
+    "{\n  \"0\": [0, 1, 4, 9, 11],\n  \"1\": [11, 14, 23],\n  \"2\": [135],\n  \"5\": [3871, 5302, 6847, 7619, 10470, 10524],\n  \"6\": [14240],\n  \"7\": [115983],\n  \"9\": [1685367, 2775070]\n}",
+    limits,
+  )
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle normalize cells-15" {
+  let limits = MocLimits::default()
+  let cells = [
+    Cell::new(Grid::from_level(4), 728),
+    Cell::new(Grid::from_level(3), 292),
+    Cell::new(Grid::from_level(5), 10470),
+    Cell::new(Grid::from_level(2), 135),
+    Cell::new(Grid::from_level(0), 1),
+    Cell::new(Grid::from_level(7), 139072),
+    Cell::new(Grid::from_level(5), 6847),
+    Cell::new(Grid::from_level(7), 189065),
+    Cell::new(Grid::from_level(0), 4),
+    Cell::new(Grid::from_level(9), 1183708),
+    Cell::new(Grid::from_level(5), 10524),
+    Cell::new(Grid::from_level(7), 189870),
+    Cell::new(Grid::from_level(5), 5302),
+    Cell::new(Grid::from_level(8), 320435),
+    Cell::new(Grid::from_level(6), 14240),
+    Cell::new(Grid::from_level(1), 23),
+    Cell::new(Grid::from_level(8), 777797),
+    Cell::new(Grid::from_level(0), 9),
+    Cell::new(Grid::from_level(7), 115983),
+    Cell::new(Grid::from_level(9), 1053733),
+    Cell::new(Grid::from_level(5), 7619),
+    Cell::new(Grid::from_level(1), 11),
+    Cell::new(Grid::from_level(7), 17577),
+    Cell::new(Grid::from_level(5), 3871),
+    Cell::new(Grid::from_level(9), 2775070),
+    Cell::new(Grid::from_level(9), 1685367),
+    Cell::new(Grid::from_level(4), 1261),
+    Cell::new(Grid::from_level(7), 4934),
+    Cell::new(Grid::from_level(1), 14),
+    Cell::new(Grid::from_level(0), 0),
+    Cell::new(Grid::from_level(0), 11),
+    Cell::new(Grid::from_level(7), 21068),
+  ]
+  let actual = Moc::from_cells(cells, 9, limits)
+  let expected = Moc::from_ascii(
+    "0/0-1 4 9 11 1/11 14 23 2/135 5/3871 5302 6847 7619 10470 10524 6/14240 7/115983 9/1685367 2775070",
+    limits,
+  )
+  assert_true(actual.equals(expected))
+  assert_eq(actual.max_order(), expected.max_order())
+}
+
+///|
+test "moc oracle cells-16" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii(
+    "0/2 10 1/4 7 23 31 38 2/6 84 100 106 137 176 189 3/37 54 61 343 546 4/1628 5/707 963 3088 3474 6317 8354 9150 9529 10090 11361",
+    limits,
+  )
+  moc_oracle_assert(
+    "cells-16",
+    actual,
+    5,
+    [
+      (25165824, 29360128),
+      (38797312, 39845888),
+      (46333952, 46399488),
+      (56623104, 57671680),
+      (63111168, 63176704),
+      (63963136, 65011712),
+      (67108864, 83886080),
+      (117440512, 201326592),
+      (202375168, 202440704),
+      (227672064, 227737600),
+      (352321536, 356515840),
+      (359661568, 360710144),
+      (385875968, 402653184),
+      (413990912, 414056448),
+      (419430400, 423624704),
+      (426770432, 427032576),
+      (444596224, 448790528),
+      (520093696, 536870912),
+      (547487744, 547553280),
+      (572522496, 573571072),
+      (574619648, 578813952),
+      (599654400, 599719936),
+      (624492544, 624558080),
+      (637534208, 654311424),
+      (661258240, 661323776),
+      (671088640, 742391808),
+      (744554496, 744620032),
+      (792723456, 796917760),
+    ],
+    [
+      6, 14, 20, 23, 39, 47, 54, 70, 148, 164, 170, 201, 240, 253, 293, 310, 317,
+      599, 802, 2652, 4803, 5059, 7184, 7570, 10413, 12450, 13246, 13625, 14186,
+      15457,
+    ],
+    "0/2 10 1/4 7 23 31 38 2/6 84 100 106 137 176 189 3/37 54 61 343 546 4/1628 5/707 963 3088 3474 6317 8354 9150 9529 10090 11361",
+    "{\"0\":[2,10],\"1\":[4,7,23,31,38],\"2\":[6,84,100,106,137,176,189],\"3\":[37,54,61,343,546],\"4\":[1628],\"5\":[707,963,3088,3474,6317,8354,9150,9529,10090,11361]}",
+  )
+}
+
+///|
+test "moc oracle JSON cells-16" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii(
+    "0/2 10 1/4 7 23 31 38 2/6 84 100 106 137 176 189 3/37 54 61 343 546 4/1628 5/707 963 3088 3474 6317 8354 9150 9529 10090 11361",
+    limits,
+  )
+  let json = Moc::from_json(
+    "{\n  \"0\": [2, 10],\n  \"1\": [4, 7, 23, 31, 38],\n  \"2\": [6, 84, 100, 106, 137, 176, 189],\n  \"3\": [37, 54, 61, 343, 546],\n  \"4\": [1628],\n  \"5\": [707, 963, 3088, 3474, 6317, 8354, 9150, 9529, 10090, 11361]\n}",
+    limits,
+  )
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle normalize cells-16" {
+  let limits = MocLimits::default()
+  let cells = [
+    Cell::new(Grid::from_level(5), 6317),
+    Cell::new(Grid::from_level(3), 642),
+    Cell::new(Grid::from_level(2), 189),
+    Cell::new(Grid::from_level(4), 1628),
+    Cell::new(Grid::from_level(5), 707),
+    Cell::new(Grid::from_level(3), 546),
+    Cell::new(Grid::from_level(1), 38),
+    Cell::new(Grid::from_level(2), 100),
+    Cell::new(Grid::from_level(5), 8354),
+    Cell::new(Grid::from_level(2), 6),
+    Cell::new(Grid::from_level(1), 4),
+    Cell::new(Grid::from_level(5), 9150),
+    Cell::new(Grid::from_level(5), 963),
+    Cell::new(Grid::from_level(0), 10),
+    Cell::new(Grid::from_level(1), 41),
+    Cell::new(Grid::from_level(1), 7),
+    Cell::new(Grid::from_level(1), 23),
+    Cell::new(Grid::from_level(5), 8024),
+    Cell::new(Grid::from_level(5), 3474),
+    Cell::new(Grid::from_level(5), 3088),
+    Cell::new(Grid::from_level(2), 137),
+    Cell::new(Grid::from_level(5), 10090),
+    Cell::new(Grid::from_level(3), 54),
+    Cell::new(Grid::from_level(3), 61),
+    Cell::new(Grid::from_level(1), 31),
+    Cell::new(Grid::from_level(5), 2673),
+    Cell::new(Grid::from_level(5), 11361),
+    Cell::new(Grid::from_level(2), 93),
+    Cell::new(Grid::from_level(5), 9529),
+    Cell::new(Grid::from_level(2), 176),
+    Cell::new(Grid::from_level(2), 84),
+    Cell::new(Grid::from_level(3), 37),
+    Cell::new(Grid::from_level(2), 106),
+    Cell::new(Grid::from_level(4), 502),
+    Cell::new(Grid::from_level(0), 2),
+    Cell::new(Grid::from_level(3), 343),
+  ]
+  let actual = Moc::from_cells(cells, 5, limits)
+  let expected = Moc::from_ascii(
+    "0/2 10 1/4 7 23 31 38 2/6 84 100 106 137 176 189 3/37 54 61 343 546 4/1628 5/707 963 3088 3474 6317 8354 9150 9529 10090 11361",
+    limits,
+  )
+  assert_true(actual.equals(expected))
+  assert_eq(actual.max_order(), expected.max_order())
+}
+
+///|
+test "moc oracle cells-17" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii(
+    "0/1 3-4 1/2 11 26 2/92 96 4/29 1961 2411 5/141 2312 9300 6/854 24112 42378 7/129785 9/2805456 3016224 10/2296050 2470303 8060489 9555361 12429556 11/21912870 26133425 29200490 36787601 44770294",
+    limits,
+  )
+  moc_oracle_assert(
+    "cells-17",
+    actual,
+    11,
+    [
+      (7602176, 7864320),
+      (9240576, 9306112),
+      (13991936, 14008320),
+      (33554432, 50331648),
+      (67108864, 134217728),
+      (146947200, 146947264),
+      (151519232, 151584768),
+      (158099392, 158099456),
+      (184549376, 335544320),
+      (350605920, 350605936),
+      (385875968, 390070272),
+      (395051008, 395067392),
+      (402653184, 406847488),
+      (418134800, 418134816),
+      (436207616, 452984832),
+      (467207840, 467207856),
+      (514064384, 514326528),
+      (515871296, 515871360),
+      (531599360, 531603456),
+      (588601616, 588601632),
+      (609484800, 609550336),
+      (611543104, 611543168),
+      (632029184, 632291328),
+      (694321152, 694337536),
+      (716324704, 716324720),
+      (718196736, 718196992),
+      (772153344, 772153600),
+      (795491584, 795491648),
+    ],
+    [
+      5, 7, 8, 18, 27, 42, 156, 160, 1053, 2985, 3435, 4237, 6408, 13396, 17238,
+      40496, 58762, 195321, 3854032, 4064800, 6490354, 6664607, 12254793, 13749665,
+      16623860, 38690086, 42910641, 45977706, 53564817, 61547510,
+    ],
+    "0/1 3-4 1/2 11 26 2/92 96 4/29 1961 2411 5/141 2312 9300 6/854 24112 42378 7/129785 9/2805456 3016224 10/2296050 2470303 8060489 9555361 12429556 11/21912870 26133425 29200490 36787601 44770294",
+    "{\"0\":[1,3,4],\"1\":[2,11,26],\"2\":[92,96],\"4\":[29,1961,2411],\"5\":[141,2312,9300],\"6\":[854,24112,42378],\"7\":[129785],\"9\":[2805456,3016224],\"10\":[2296050,2470303,8060489,9555361,12429556],\"11\":[21912870,26133425,29200490,36787601,44770294]}",
+  )
+}
+
+///|
+test "moc oracle JSON cells-17" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii(
+    "0/1 3-4 1/2 11 26 2/92 96 4/29 1961 2411 5/141 2312 9300 6/854 24112 42378 7/129785 9/2805456 3016224 10/2296050 2470303 8060489 9555361 12429556 11/21912870 26133425 29200490 36787601 44770294",
+    limits,
+  )
+  let json = Moc::from_json(
+    "{\n  \"0\": [1, 3, 4],\n  \"1\": [2, 11, 26],\n  \"2\": [92, 96],\n  \"4\": [29, 1961, 2411],\n  \"5\": [141, 2312, 9300],\n  \"6\": [854, 24112, 42378],\n  \"7\": [129785],\n  \"9\": [2805456, 3016224],\n  \"10\": [2296050, 2470303, 8060489, 9555361, 12429556],\n  \"11\": [21912870, 26133425, 29200490, 36787601, 44770294]\n}",
+    limits,
+  )
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle normalize cells-17" {
+  let limits = MocLimits::default()
+  let cells = [
+    Cell::new(Grid::from_level(10), 2296050),
+    Cell::new(Grid::from_level(7), 51557),
+    Cell::new(Grid::from_level(4), 1961),
+    Cell::new(Grid::from_level(10), 12429556),
+    Cell::new(Grid::from_level(5), 9300),
+    Cell::new(Grid::from_level(2), 92),
+    Cell::new(Grid::from_level(2), 51),
+    Cell::new(Grid::from_level(6), 854),
+    Cell::new(Grid::from_level(0), 1),
+    Cell::new(Grid::from_level(4), 1196),
+    Cell::new(Grid::from_level(10), 9555361),
+    Cell::new(Grid::from_level(11), 29200490),
+    Cell::new(Grid::from_level(0), 3),
+    Cell::new(Grid::from_level(11), 44770294),
+    Cell::new(Grid::from_level(1), 2),
+    Cell::new(Grid::from_level(1), 11),
+    Cell::new(Grid::from_level(6), 20401),
+    Cell::new(Grid::from_level(6), 5489),
+    Cell::new(Grid::from_level(2), 76),
+    Cell::new(Grid::from_level(10), 2470303),
+    Cell::new(Grid::from_level(6), 42378),
+    Cell::new(Grid::from_level(11), 21912870),
+    Cell::new(Grid::from_level(8), 223628),
+    Cell::new(Grid::from_level(6), 24112),
+    Cell::new(Grid::from_level(9), 2805456),
+    Cell::new(Grid::from_level(4), 2411),
+    Cell::new(Grid::from_level(5), 2312),
+    Cell::new(Grid::from_level(2), 54),
+    Cell::new(Grid::from_level(9), 3016224),
+    Cell::new(Grid::from_level(2), 96),
+    Cell::new(Grid::from_level(0), 4),
+    Cell::new(Grid::from_level(5), 4917),
+    Cell::new(Grid::from_level(11), 20521958),
+    Cell::new(Grid::from_level(7), 129785),
+    Cell::new(Grid::from_level(5), 141),
+    Cell::new(Grid::from_level(2), 104),
+    Cell::new(Grid::from_level(10), 8060489),
+    Cell::new(Grid::from_level(11), 26133425),
+    Cell::new(Grid::from_level(7), 94706),
+    Cell::new(Grid::from_level(1), 26),
+    Cell::new(Grid::from_level(0), 3),
+    Cell::new(Grid::from_level(4), 29),
+    Cell::new(Grid::from_level(11), 36787601),
+    Cell::new(Grid::from_level(2), 58),
+  ]
+  let actual = Moc::from_cells(cells, 11, limits)
+  let expected = Moc::from_ascii(
+    "0/1 3-4 1/2 11 26 2/92 96 4/29 1961 2411 5/141 2312 9300 6/854 24112 42378 7/129785 9/2805456 3016224 10/2296050 2470303 8060489 9555361 12429556 11/21912870 26133425 29200490 36787601 44770294",
+    limits,
+  )
+  assert_true(actual.equals(expected))
+  assert_eq(actual.max_order(), expected.max_order())
+}
+
+///|
+test "moc oracle cells-18" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii(
+    "0/5 1/4 29 34 40 42 47 2/79 99 107-108 3/33 590 618 636 4/494 544 1540 1559 2835 5/571 575 949 1903 2698 7900 11979 6/9969 16236",
+    limits,
+  )
+  moc_oracle_assert(
+    "cells-18",
+    actual,
+    6,
+    [
+      (34603008, 35651584),
+      (37421056, 37486592),
+      (37683200, 37748736),
+      (62193664, 62259200),
+      (67108864, 83886080),
+      (124715008, 124780544),
+      (129499136, 129761280),
+      (142606336, 142868480),
+      (163332096, 163348480),
+      (176816128, 176881664),
+      (266010624, 266027008),
+      (331350016, 402653184),
+      (403701760, 403963904),
+      (408682496, 408944640),
+      (415236096, 419430400),
+      (448790528, 457179136),
+      (486539264, 503316480),
+      (517734400, 517799936),
+      (570425344, 587202560),
+      (618659840, 619708416),
+      (648019968, 649068544),
+      (666894336, 667942912),
+      (671088640, 687865856),
+      (704643072, 721420288),
+      (743178240, 743440384),
+      (785055744, 785121280),
+      (788529152, 805306368),
+    ],
+    [
+      9, 20, 45, 50, 56, 58, 63, 143, 163, 171, 172, 289, 846, 874, 892, 1518, 1568,
+      2564, 2583, 3859, 4667, 4671, 5045, 5999, 6794, 11996, 16075, 26353, 32620,
+    ],
+    "0/5 1/4 29 34 40 42 47 2/79 99 107-108 3/33 590 618 636 4/494 544 1540 1559 2835 5/571 575 949 1903 2698 7900 11979 6/9969 16236",
+    "{\"0\":[5],\"1\":[4,29,34,40,42,47],\"2\":[79,99,107,108],\"3\":[33,590,618,636],\"4\":[494,544,1540,1559,2835],\"5\":[571,575,949,1903,2698,7900,11979],\"6\":[9969,16236]}",
+  )
+}
+
+///|
+test "moc oracle JSON cells-18" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii(
+    "0/5 1/4 29 34 40 42 47 2/79 99 107-108 3/33 590 618 636 4/494 544 1540 1559 2835 5/571 575 949 1903 2698 7900 11979 6/9969 16236",
+    limits,
+  )
+  let json = Moc::from_json(
+    "{\n  \"0\": [5],\n  \"1\": [4, 29, 34, 40, 42, 47],\n  \"2\": [79, 99, 107, 108],\n  \"3\": [33, 590, 618, 636],\n  \"4\": [494, 544, 1540, 1559, 2835],\n  \"5\": [571, 575, 949, 1903, 2698, 7900, 11979],\n  \"6\": [9969, 16236]\n}",
+    limits,
+  )
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle normalize cells-18" {
+  let limits = MocLimits::default()
+  let cells = [
+    Cell::new(Grid::from_level(5), 5756),
+    Cell::new(Grid::from_level(1), 34),
+    Cell::new(Grid::from_level(4), 544),
+    Cell::new(Grid::from_level(1), 22),
+    Cell::new(Grid::from_level(5), 2698),
+    Cell::new(Grid::from_level(2), 108),
+    Cell::new(Grid::from_level(6), 20299),
+    Cell::new(Grid::from_level(5), 575),
+    Cell::new(Grid::from_level(5), 7900),
+    Cell::new(Grid::from_level(4), 494),
+    Cell::new(Grid::from_level(2), 107),
+    Cell::new(Grid::from_level(6), 35015),
+    Cell::new(Grid::from_level(4), 1540),
+    Cell::new(Grid::from_level(3), 636),
+    Cell::new(Grid::from_level(1), 29),
+    Cell::new(Grid::from_level(5), 1173),
+    Cell::new(Grid::from_level(3), 618),
+    Cell::new(Grid::from_level(1), 47),
+    Cell::new(Grid::from_level(3), 590),
+    Cell::new(Grid::from_level(5), 571),
+    Cell::new(Grid::from_level(5), 949),
+    Cell::new(Grid::from_level(5), 1903),
+    Cell::new(Grid::from_level(6), 16236),
+    Cell::new(Grid::from_level(2), 79),
+    Cell::new(Grid::from_level(4), 1401),
+    Cell::new(Grid::from_level(5), 11979),
+    Cell::new(Grid::from_level(4), 2835),
+    Cell::new(Grid::from_level(2), 99),
+    Cell::new(Grid::from_level(1), 4),
+    Cell::new(Grid::from_level(0), 5),
+    Cell::new(Grid::from_level(1), 42),
+    Cell::new(Grid::from_level(5), 12083),
+    Cell::new(Grid::from_level(1), 40),
+    Cell::new(Grid::from_level(3), 33),
+    Cell::new(Grid::from_level(6), 9969),
+    Cell::new(Grid::from_level(4), 1559),
+  ]
+  let actual = Moc::from_cells(cells, 6, limits)
+  let expected = Moc::from_ascii(
+    "0/5 1/4 29 34 40 42 47 2/79 99 107-108 3/33 590 618 636 4/494 544 1540 1559 2835 5/571 575 949 1903 2698 7900 11979 6/9969 16236",
+    limits,
+  )
+  assert_true(actual.equals(expected))
+  assert_eq(actual.max_order(), expected.max_order())
+}
+
+///|
+test "moc oracle cells-19" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii("0/2 5-11", limits)
+  moc_oracle_assert(
+    "cells-19",
+    actual,
+    0,
+    [(134217728, 201326592), (335544320, 805306368)],
+    [6, 9, 10, 11, 12, 13, 14, 15],
+    "0/2 5-11",
+    "{\"0\":[2,5,6,7,8,9,10,11]}",
+  )
+}
+
+///|
+test "moc oracle JSON cells-19" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii("0/2 5-11", limits)
+  let json = Moc::from_json("{\n  \"0\": [2, 5, 6, 7, 8, 9, 10, 11]\n}", limits)
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle normalize cells-19" {
+  let limits = MocLimits::default()
+  let cells = [
+    Cell::new(Grid::from_level(0), 9),
+    Cell::new(Grid::from_level(0), 11),
+    Cell::new(Grid::from_level(0), 7),
+    Cell::new(Grid::from_level(0), 5),
+    Cell::new(Grid::from_level(0), 6),
+    Cell::new(Grid::from_level(0), 9),
+    Cell::new(Grid::from_level(0), 10),
+    Cell::new(Grid::from_level(0), 8),
+    Cell::new(Grid::from_level(0), 2),
+    Cell::new(Grid::from_level(0), 6),
+    Cell::new(Grid::from_level(0), 9),
+    Cell::new(Grid::from_level(0), 10),
+    Cell::new(Grid::from_level(0), 9),
+    Cell::new(Grid::from_level(0), 5),
+    Cell::new(Grid::from_level(0), 5),
+    Cell::new(Grid::from_level(0), 8),
+    Cell::new(Grid::from_level(0), 2),
+    Cell::new(Grid::from_level(0), 2),
+  ]
+  let actual = Moc::from_cells(cells, 0, limits)
+  let expected = Moc::from_ascii("0/2 5-11", limits)
+  assert_true(actual.equals(expected))
+  assert_eq(actual.max_order(), expected.max_order())
+}
+
+///|
+test "moc oracle cells-20" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii(
+    "0/0-1 4 6-7 9 11 2/37 3/137 241 4/1286 2635 2701 5/2525 8994 10787 6/21648 42320 8/687846 9/949090 1379111 11/12360964 15306428",
+    limits,
+  )
+  moc_oracle_assert(
+    "cells-20",
+    actual,
+    11,
+    [
+      (0, 134217728),
+      (143654912, 144703488),
+      (155189248, 159383552),
+      (165478400, 165543936),
+      (197775424, 197775440),
+      (242967040, 242967296),
+      (244902848, 244902864),
+      (252706816, 253755392),
+      (268435456, 335544320),
+      (337117184, 337379328),
+      (353052416, 353052672),
+      (354680832, 354697216),
+      (402653184, 536870912),
+      (589430784, 589496320),
+      (603979776, 671088640),
+      (690749440, 691011584),
+      (693370880, 693387264),
+      (704354304, 704355328),
+      (706936832, 707002368),
+      (708050944, 708313088),
+      (738197504, 805306368),
+    ],
+    [
+      4, 5, 8, 10, 11, 13, 15, 101, 393, 497, 2310, 3659, 3725, 6621, 13090, 14883,
+      38032, 58704, 949990, 1997666, 2427687, 29138180, 32083644,
+    ],
+    "0/0-1 4 6-7 9 11 2/37 3/137 241 4/1286 2635 2701 5/2525 8994 10787 6/21648 42320 8/687846 9/949090 1379111 11/12360964 15306428",
+    "{\"0\":[0,1,4,6,7,9,11],\"2\":[37],\"3\":[137,241],\"4\":[1286,2635,2701],\"5\":[2525,8994,10787],\"6\":[21648,42320],\"8\":[687846],\"9\":[949090,1379111],\"11\":[12360964,15306428]}",
+  )
+}
+
+///|
+test "moc oracle JSON cells-20" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii(
+    "0/0-1 4 6-7 9 11 2/37 3/137 241 4/1286 2635 2701 5/2525 8994 10787 6/21648 42320 8/687846 9/949090 1379111 11/12360964 15306428",
+    limits,
+  )
+  let json = Moc::from_json(
+    "{\n  \"0\": [0, 1, 4, 6, 7, 9, 11],\n  \"2\": [37],\n  \"3\": [137, 241],\n  \"4\": [1286, 2635, 2701],\n  \"5\": [2525, 8994, 10787],\n  \"6\": [21648, 42320],\n  \"8\": [687846],\n  \"9\": [949090, 1379111],\n  \"11\": [12360964, 15306428]\n}",
+    limits,
+  )
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle normalize cells-20" {
+  let limits = MocLimits::default()
+  let cells = [
+    Cell::new(Grid::from_level(11), 12360964),
+    Cell::new(Grid::from_level(11), 15306428),
+    Cell::new(Grid::from_level(7), 20428),
+    Cell::new(Grid::from_level(8), 728373),
+    Cell::new(Grid::from_level(10), 1410615),
+    Cell::new(Grid::from_level(1), 37),
+    Cell::new(Grid::from_level(4), 1286),
+    Cell::new(Grid::from_level(0), 9),
+    Cell::new(Grid::from_level(6), 42320),
+    Cell::new(Grid::from_level(9), 1670395),
+    Cell::new(Grid::from_level(5), 861),
+    Cell::new(Grid::from_level(4), 1152),
+    Cell::new(Grid::from_level(9), 1228377),
+    Cell::new(Grid::from_level(6), 40464),
+    Cell::new(Grid::from_level(6), 25423),
+    Cell::new(Grid::from_level(4), 1889),
+    Cell::new(Grid::from_level(9), 1883662),
+    Cell::new(Grid::from_level(6), 21648),
+    Cell::new(Grid::from_level(4), 2635),
+    Cell::new(Grid::from_level(9), 1379111),
+    Cell::new(Grid::from_level(1), 30),
+    Cell::new(Grid::from_level(3), 241),
+    Cell::new(Grid::from_level(5), 8994),
+    Cell::new(Grid::from_level(3), 723),
+    Cell::new(Grid::from_level(3), 122),
+    Cell::new(Grid::from_level(2), 29),
+    Cell::new(Grid::from_level(0), 7),
+    Cell::new(Grid::from_level(4), 2701),
+    Cell::new(Grid::from_level(3), 137),
+    Cell::new(Grid::from_level(10), 10153470),
+    Cell::new(Grid::from_level(0), 6),
+    Cell::new(Grid::from_level(9), 949090),
+    Cell::new(Grid::from_level(0), 4),
+    Cell::new(Grid::from_level(8), 517477),
+    Cell::new(Grid::from_level(2), 37),
+    Cell::new(Grid::from_level(11), 49445934),
+    Cell::new(Grid::from_level(0), 6),
+    Cell::new(Grid::from_level(5), 2525),
+    Cell::new(Grid::from_level(0), 1),
+    Cell::new(Grid::from_level(10), 8276097),
+    Cell::new(Grid::from_level(2), 10),
+    Cell::new(Grid::from_level(10), 12028184),
+    Cell::new(Grid::from_level(8), 687846),
+    Cell::new(Grid::from_level(9), 324606),
+    Cell::new(Grid::from_level(5), 10787),
+    Cell::new(Grid::from_level(0), 0),
+    Cell::new(Grid::from_level(8), 778717),
+    Cell::new(Grid::from_level(9), 2384703),
+    Cell::new(Grid::from_level(10), 11536348),
+    Cell::new(Grid::from_level(0), 11),
+  ]
+  let actual = Moc::from_cells(cells, 11, limits)
+  let expected = Moc::from_ascii(
+    "0/0-1 4 6-7 9 11 2/37 3/137 241 4/1286 2635 2701 5/2525 8994 10787 6/21648 42320 8/687846 9/949090 1379111 11/12360964 15306428",
+    limits,
+  )
+  assert_true(actual.equals(expected))
+  assert_eq(actual.max_order(), expected.max_order())
+}
+
+///|
+test "moc oracle cells-21" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii(
+    "1/2 47 3/620 4/632 5/2301 9216 7/132811", limits,
+  )
+  moc_oracle_assert(
+    "cells-21",
+    actual,
+    7,
+    [
+      (33554432, 50331648),
+      (150798336, 150863872),
+      (165675008, 165937152),
+      (543993856, 543997952),
+      (603979776, 604045312),
+      (650117120, 651165696),
+      (788529152, 805306368),
+    ],
+    [18, 63, 876, 1656, 6397, 13312, 198347],
+    "1/2 47 3/620 4/632 5/2301 9216 7/132811",
+    "{\"1\":[2,47],\"3\":[620],\"4\":[632],\"5\":[2301,9216],\"7\":[132811]}",
+  )
+}
+
+///|
+test "moc oracle JSON cells-21" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii("1/2 47 3/620 4/632 5/2301 9216 7/132811", limits)
+  let json = Moc::from_json(
+    "{\n  \"1\": [2, 47],\n  \"3\": [620],\n  \"4\": [632],\n  \"5\": [2301, 9216],\n  \"7\": [132811]\n}",
+    limits,
+  )
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle normalize cells-21" {
+  let limits = MocLimits::default()
+  let cells = [
+    Cell::new(Grid::from_level(5), 2301),
+    Cell::new(Grid::from_level(5), 9216),
+    Cell::new(Grid::from_level(7), 132811),
+    Cell::new(Grid::from_level(1), 2),
+    Cell::new(Grid::from_level(4), 632),
+    Cell::new(Grid::from_level(4), 3037),
+    Cell::new(Grid::from_level(1), 47),
+    Cell::new(Grid::from_level(3), 620),
+  ]
+  let actual = Moc::from_cells(cells, 7, limits)
+  let expected = Moc::from_ascii(
+    "1/2 47 3/620 4/632 5/2301 9216 7/132811", limits,
+  )
+  assert_true(actual.equals(expected))
+  assert_eq(actual.max_order(), expected.max_order())
+}
+
+///|
+test "moc oracle cells-22" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii(
+    "0/1 7 10 1/16 18 23 25 33 39 2/59 62 140 150 185 3/9 172 320 567 727 761 4/969 1119 1577 1721 2237 5/1016 5088 7119 6/27943 32929 7/99573",
+    limits,
+  )
+  moc_oracle_assert(
+    "cells-22",
+    actual,
+    7,
+    [
+      (9437184, 10485760),
+      (66584576, 66650112),
+      (67108864, 134217728),
+      (180355072, 181403648),
+      (247463936, 251658240),
+      (254017536, 254279680),
+      (260046848, 264241152),
+      (268435456, 285212672),
+      (293339136, 293601280),
+      (301989888, 318767104),
+      (333447168, 333512704),
+      (335544320, 336592896),
+      (385875968, 402653184),
+      (407851008, 407855104),
+      (413401088, 413663232),
+      (419430400, 436207616),
+      (451149824, 451411968),
+      (457818112, 457834496),
+      (466550784, 466616320),
+      (469762048, 536870912),
+      (539508736, 539525120),
+      (553648128, 570425344),
+      (586416128, 586678272),
+      (587202560, 591396864),
+      (594542592, 595591168),
+      (629145600, 633339904),
+      (654311424, 738197504),
+      (762314752, 763363328),
+      (775946240, 780140544),
+      (797966336, 799014912),
+    ],
+    [
+      5, 11, 14, 32, 34, 39, 41, 49, 55, 123, 126, 204, 214, 249, 265, 428, 576,
+      823, 983, 1017, 1993, 2143, 2601, 2745, 3261, 5112, 9184, 11215, 44327, 49313,
+      165109,
+    ],
+    "0/1 7 10 1/16 18 23 25 33 39 2/59 62 140 150 185 3/9 172 320 567 727 761 4/969 1119 1577 1721 2237 5/1016 5088 7119 6/27943 32929 7/99573",
+    "{\"0\":[1,7,10],\"1\":[16,18,23,25,33,39],\"2\":[59,62,140,150,185],\"3\":[9,172,320,567,727,761],\"4\":[969,1119,1577,1721,2237],\"5\":[1016,5088,7119],\"6\":[27943,32929],\"7\":[99573]}",
+  )
+}
+
+///|
+test "moc oracle JSON cells-22" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii(
+    "0/1 7 10 1/16 18 23 25 33 39 2/59 62 140 150 185 3/9 172 320 567 727 761 4/969 1119 1577 1721 2237 5/1016 5088 7119 6/27943 32929 7/99573",
+    limits,
+  )
+  let json = Moc::from_json(
+    "{\n  \"0\": [1, 7, 10],\n  \"1\": [16, 18, 23, 25, 33, 39],\n  \"2\": [59, 62, 140, 150, 185],\n  \"3\": [9, 172, 320, 567, 727, 761],\n  \"4\": [969, 1119, 1577, 1721, 2237],\n  \"5\": [1016, 5088, 7119],\n  \"6\": [27943, 32929],\n  \"7\": [99573]\n}",
+    limits,
+  )
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle normalize cells-22" {
+  let limits = MocLimits::default()
+  let cells = [
+    Cell::new(Grid::from_level(3), 561),
+    Cell::new(Grid::from_level(4), 969),
+    Cell::new(Grid::from_level(4), 2746),
+    Cell::new(Grid::from_level(3), 651),
+    Cell::new(Grid::from_level(3), 320),
+    Cell::new(Grid::from_level(1), 5),
+    Cell::new(Grid::from_level(3), 172),
+    Cell::new(Grid::from_level(4), 1721),
+    Cell::new(Grid::from_level(2), 162),
+    Cell::new(Grid::from_level(2), 62),
+    Cell::new(Grid::from_level(6), 30761),
+    Cell::new(Grid::from_level(7), 99573),
+    Cell::new(Grid::from_level(2), 140),
+    Cell::new(Grid::from_level(4), 2037),
+    Cell::new(Grid::from_level(3), 727),
+    Cell::new(Grid::from_level(3), 265),
+    Cell::new(Grid::from_level(1), 23),
+    Cell::new(Grid::from_level(5), 7119),
+    Cell::new(Grid::from_level(2), 18),
+    Cell::new(Grid::from_level(2), 100),
+    Cell::new(Grid::from_level(0), 10),
+    Cell::new(Grid::from_level(2), 31),
+    Cell::new(Grid::from_level(7), 176096),
+    Cell::new(Grid::from_level(2), 59),
+    Cell::new(Grid::from_level(4), 1162),
+    Cell::new(Grid::from_level(3), 761),
+    Cell::new(Grid::from_level(3), 9),
+    Cell::new(Grid::from_level(5), 1016),
+    Cell::new(Grid::from_level(3), 562),
+    Cell::new(Grid::from_level(2), 185),
+    Cell::new(Grid::from_level(4), 2237),
+    Cell::new(Grid::from_level(1), 18),
+    Cell::new(Grid::from_level(2), 150),
+    Cell::new(Grid::from_level(4), 2815),
+    Cell::new(Grid::from_level(6), 27943),
+    Cell::new(Grid::from_level(0), 1),
+    Cell::new(Grid::from_level(1), 16),
+    Cell::new(Grid::from_level(4), 1119),
+    Cell::new(Grid::from_level(1), 39),
+    Cell::new(Grid::from_level(3), 567),
+    Cell::new(Grid::from_level(1), 33),
+    Cell::new(Grid::from_level(7), 95869),
+    Cell::new(Grid::from_level(5), 5088),
+    Cell::new(Grid::from_level(1), 16),
+    Cell::new(Grid::from_level(2), 118),
+    Cell::new(Grid::from_level(5), 11052),
+    Cell::new(Grid::from_level(0), 7),
+    Cell::new(Grid::from_level(6), 32929),
+    Cell::new(Grid::from_level(4), 1577),
+    Cell::new(Grid::from_level(1), 25),
+    Cell::new(Grid::from_level(6), 43807),
+  ]
+  let actual = Moc::from_cells(cells, 7, limits)
+  let expected = Moc::from_ascii(
+    "0/1 7 10 1/16 18 23 25 33 39 2/59 62 140 150 185 3/9 172 320 567 727 761 4/969 1119 1577 1721 2237 5/1016 5088 7119 6/27943 32929 7/99573",
+    limits,
+  )
+  assert_true(actual.equals(expected))
+  assert_eq(actual.max_order(), expected.max_order())
+}
+
+///|
+test "moc oracle cells-23" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii(
+    "0/3-5 10 1/0 7 29-30 34-35 2/39 126 131 176 3/54 407 765 4/130 447 5/2241 2351 2618 9738 6/2800 11435 27848 46449 7/19197 20336 32992 101343 127084",
+    limits,
+  )
+  moc_oracle_assert(
+    "cells-23",
+    actual,
+    7,
+    [
+      (0, 16777216),
+      (34078720, 34340864),
+      (45875200, 45891584),
+      (56623104, 57671680),
+      (78630912, 78635008),
+      (83296256, 83300352),
+      (117178368, 134217728),
+      (135135232, 135139328),
+      (146866176, 146931712),
+      (154075136, 154140672),
+      (163577856, 167772160),
+      (171573248, 171638784),
+      (187351040, 187367424),
+      (201326592, 402653184),
+      (415100928, 415105024),
+      (426770432, 427819008),
+      (456261632, 456278016),
+      (486539264, 520093696),
+      (520536064, 520540160),
+      (528482304, 532676608),
+      (549453824, 553648128),
+      (570425344, 603979776),
+      (638189568, 638255104),
+      (671088640, 742391808),
+      (761020416, 761036800),
+      (802160640, 803209216),
+    ],
+    [
+      7, 8, 9, 14, 16, 23, 45, 46, 50, 51, 103, 190, 195, 240, 310, 663, 1021, 1154,
+      1471, 6337, 6447, 6714, 13834, 19184, 27819, 44232, 62833, 84733, 85872, 98528,
+      166879, 192620,
+    ],
+    "0/3-5 10 1/0 7 29-30 34-35 2/39 126 131 176 3/54 407 765 4/130 447 5/2241 2351 2618 9738 6/2800 11435 27848 46449 7/19197 20336 32992 101343 127084",
+    "{\"0\":[3,4,5,10],\"1\":[0,7,29,30,34,35],\"2\":[39,126,131,176],\"3\":[54,407,765],\"4\":[130,447],\"5\":[2241,2351,2618,9738],\"6\":[2800,11435,27848,46449],\"7\":[19197,20336,32992,101343,127084]}",
+  )
+}
+
+///|
+test "moc oracle JSON cells-23" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii(
+    "0/3-5 10 1/0 7 29-30 34-35 2/39 126 131 176 3/54 407 765 4/130 447 5/2241 2351 2618 9738 6/2800 11435 27848 46449 7/19197 20336 32992 101343 127084",
+    limits,
+  )
+  let json = Moc::from_json(
+    "{\n  \"0\": [3, 4, 5, 10],\n  \"1\": [0, 7, 29, 30, 34, 35],\n  \"2\": [39, 126, 131, 176],\n  \"3\": [54, 407, 765],\n  \"4\": [130, 447],\n  \"5\": [2241, 2351, 2618, 9738],\n  \"6\": [2800, 11435, 27848, 46449],\n  \"7\": [19197, 20336, 32992, 101343, 127084]\n}",
+    limits,
+  )
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle normalize cells-23" {
+  let limits = MocLimits::default()
+  let cells = [
+    Cell::new(Grid::from_level(1), 19),
+    Cell::new(Grid::from_level(1), 0),
+    Cell::new(Grid::from_level(4), 1905),
+    Cell::new(Grid::from_level(1), 29),
+    Cell::new(Grid::from_level(5), 9738),
+    Cell::new(Grid::from_level(6), 2800),
+    Cell::new(Grid::from_level(6), 27848),
+    Cell::new(Grid::from_level(2), 28),
+    Cell::new(Grid::from_level(1), 7),
+    Cell::new(Grid::from_level(4), 2781),
+    Cell::new(Grid::from_level(5), 2351),
+    Cell::new(Grid::from_level(4), 1512),
+    Cell::new(Grid::from_level(7), 172739),
+    Cell::new(Grid::from_level(0), 4),
+    Cell::new(Grid::from_level(7), 19197),
+    Cell::new(Grid::from_level(7), 32992),
+    Cell::new(Grid::from_level(3), 700),
+    Cell::new(Grid::from_level(2), 126),
+    Cell::new(Grid::from_level(6), 409),
+    Cell::new(Grid::from_level(4), 1305),
+    Cell::new(Grid::from_level(2), 122),
+    Cell::new(Grid::from_level(3), 407),
+    Cell::new(Grid::from_level(7), 73115),
+    Cell::new(Grid::from_level(0), 5),
+    Cell::new(Grid::from_level(1), 35),
+    Cell::new(Grid::from_level(1), 13),
+    Cell::new(Grid::from_level(0), 3),
+    Cell::new(Grid::from_level(7), 1423),
+    Cell::new(Grid::from_level(6), 16142),
+    Cell::new(Grid::from_level(2), 39),
+    Cell::new(Grid::from_level(2), 176),
+    Cell::new(Grid::from_level(3), 765),
+    Cell::new(Grid::from_level(2), 131),
+    Cell::new(Grid::from_level(1), 34),
+    Cell::new(Grid::from_level(5), 2618),
+    Cell::new(Grid::from_level(4), 447),
+    Cell::new(Grid::from_level(7), 85643),
+    Cell::new(Grid::from_level(6), 11435),
+    Cell::new(Grid::from_level(7), 101343),
+    Cell::new(Grid::from_level(0), 3),
+    Cell::new(Grid::from_level(7), 127084),
+    Cell::new(Grid::from_level(7), 20336),
+    Cell::new(Grid::from_level(3), 54),
+    Cell::new(Grid::from_level(1), 17),
+    Cell::new(Grid::from_level(1), 30),
+    Cell::new(Grid::from_level(5), 7715),
+    Cell::new(Grid::from_level(6), 46449),
+    Cell::new(Grid::from_level(5), 8126),
+    Cell::new(Grid::from_level(5), 4245),
+    Cell::new(Grid::from_level(0), 10),
+    Cell::new(Grid::from_level(2), 121),
+    Cell::new(Grid::from_level(5), 2241),
+    Cell::new(Grid::from_level(2), 143),
+    Cell::new(Grid::from_level(7), 173507),
+    Cell::new(Grid::from_level(3), 332),
+    Cell::new(Grid::from_level(4), 130),
+  ]
+  let actual = Moc::from_cells(cells, 7, limits)
+  let expected = Moc::from_ascii(
+    "0/3-5 10 1/0 7 29-30 34-35 2/39 126 131 176 3/54 407 765 4/130 447 5/2241 2351 2618 9738 6/2800 11435 27848 46449 7/19197 20336 32992 101343 127084",
+    limits,
+  )
+  assert_true(actual.equals(expected))
+  assert_eq(actual.max_order(), expected.max_order())
+}
+
+///|
+test "moc oracle cells-24" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii("1/9 25 2/28 3/80 164 247 4/1887 5/", limits)
+  moc_oracle_assert(
+    "cells-24",
+    actual,
+    5,
+    [
+      (83886080, 84934656),
+      (117440512, 121634816),
+      (150994944, 167772160),
+      (171966464, 173015040),
+      (258998272, 260046848),
+      (419430400, 436207616),
+      (494665728, 494927872),
+    ],
+    [25, 41, 92, 336, 420, 503, 2911],
+    "1/9 25 2/28 3/80 164 247 4/1887 5/",
+    "{\"1\":[9,25],\"2\":[28],\"3\":[80,164,247],\"4\":[1887],\"5\":[]}",
+  )
+}
+
+///|
+test "moc oracle JSON cells-24" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii("1/9 25 2/28 3/80 164 247 4/1887 5/", limits)
+  let json = Moc::from_json(
+    "{\n  \"1\": [9, 25],\n  \"2\": [28],\n  \"3\": [80, 164, 247],\n  \"4\": [1887],\n  \"5\": []\n}",
+    limits,
+  )
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle normalize cells-24" {
+  let limits = MocLimits::default()
+  let cells = [
+    Cell::new(Grid::from_level(1), 25),
+    Cell::new(Grid::from_level(3), 247),
+    Cell::new(Grid::from_level(4), 1887),
+    Cell::new(Grid::from_level(2), 28),
+    Cell::new(Grid::from_level(1), 9),
+    Cell::new(Grid::from_level(3), 80),
+    Cell::new(Grid::from_level(3), 164),
+  ]
+  let actual = Moc::from_cells(cells, 5, limits)
+  let expected = Moc::from_ascii("1/9 25 2/28 3/80 164 247 4/1887 5/", limits)
+  assert_true(actual.equals(expected))
+  assert_eq(actual.max_order(), expected.max_order())
+}
+
+///|
+test "moc oracle cells-25" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii("0/0-3 8-11 1/18 20 23-24 26 30-31 2/70", limits)
+  moc_oracle_assert(
+    "cells-25",
+    actual,
+    2,
+    [
+      (0, 268435456),
+      (293601280, 297795584),
+      (301989888, 318767104),
+      (335544320, 352321536),
+      (385875968, 419430400),
+      (436207616, 452984832),
+      (503316480, 805306368),
+    ],
+    [4, 5, 6, 7, 12, 13, 14, 15, 34, 36, 39, 40, 42, 46, 47, 134],
+    "0/0-3 8-11 1/18 20 23-24 26 30-31 2/70",
+    "{\"0\":[0,1,2,3,8,9,10,11],\"1\":[18,20,23,24,26,30,31],\"2\":[70]}",
+  )
+}
+
+///|
+test "moc oracle JSON cells-25" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii("0/0-3 8-11 1/18 20 23-24 26 30-31 2/70", limits)
+  let json = Moc::from_json(
+    "{\n  \"0\": [0, 1, 2, 3, 8, 9, 10, 11],\n  \"1\": [18, 20, 23, 24, 26, 30, 31],\n  \"2\": [70]\n}",
+    limits,
+  )
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle normalize cells-25" {
+  let limits = MocLimits::default()
+  let cells = [
+    Cell::new(Grid::from_level(1), 23),
+    Cell::new(Grid::from_level(0), 3),
+    Cell::new(Grid::from_level(0), 9),
+    Cell::new(Grid::from_level(0), 0),
+    Cell::new(Grid::from_level(0), 11),
+    Cell::new(Grid::from_level(0), 9),
+    Cell::new(Grid::from_level(2), 127),
+    Cell::new(Grid::from_level(1), 11),
+    Cell::new(Grid::from_level(1), 45),
+    Cell::new(Grid::from_level(0), 10),
+    Cell::new(Grid::from_level(1), 26),
+    Cell::new(Grid::from_level(0), 3),
+    Cell::new(Grid::from_level(2), 70),
+    Cell::new(Grid::from_level(1), 3),
+    Cell::new(Grid::from_level(0), 10),
+    Cell::new(Grid::from_level(1), 11),
+    Cell::new(Grid::from_level(2), 7),
+    Cell::new(Grid::from_level(0), 3),
+    Cell::new(Grid::from_level(1), 31),
+    Cell::new(Grid::from_level(1), 11),
+    Cell::new(Grid::from_level(0), 10),
+    Cell::new(Grid::from_level(1), 18),
+    Cell::new(Grid::from_level(0), 8),
+    Cell::new(Grid::from_level(2), 150),
+    Cell::new(Grid::from_level(2), 167),
+    Cell::new(Grid::from_level(2), 181),
+    Cell::new(Grid::from_level(1), 18),
+    Cell::new(Grid::from_level(2), 122),
+    Cell::new(Grid::from_level(1), 15),
+    Cell::new(Grid::from_level(1), 26),
+    Cell::new(Grid::from_level(1), 10),
+    Cell::new(Grid::from_level(1), 11),
+    Cell::new(Grid::from_level(1), 30),
+    Cell::new(Grid::from_level(1), 6),
+    Cell::new(Grid::from_level(1), 8),
+    Cell::new(Grid::from_level(0), 10),
+    Cell::new(Grid::from_level(0), 10),
+    Cell::new(Grid::from_level(2), 23),
+    Cell::new(Grid::from_level(0), 10),
+    Cell::new(Grid::from_level(1), 20),
+    Cell::new(Grid::from_level(1), 3),
+    Cell::new(Grid::from_level(1), 24),
+    Cell::new(Grid::from_level(1), 41),
+    Cell::new(Grid::from_level(1), 9),
+    Cell::new(Grid::from_level(1), 13),
+    Cell::new(Grid::from_level(2), 83),
+    Cell::new(Grid::from_level(0), 1),
+    Cell::new(Grid::from_level(1), 40),
+    Cell::new(Grid::from_level(2), 20),
+    Cell::new(Grid::from_level(2), 185),
+    Cell::new(Grid::from_level(0), 3),
+    Cell::new(Grid::from_level(0), 9),
+    Cell::new(Grid::from_level(1), 44),
+    Cell::new(Grid::from_level(2), 129),
+    Cell::new(Grid::from_level(0), 3),
+  ]
+  let actual = Moc::from_cells(cells, 2, limits)
+  let expected = Moc::from_ascii(
+    "0/0-3 8-11 1/18 20 23-24 26 30-31 2/70", limits,
+  )
+  assert_true(actual.equals(expected))
+  assert_eq(actual.max_order(), expected.max_order())
+}
+
+///|
+test "moc oracle cells-26" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii(
+    "0/2 8 2/100 159 165 173 3/699 4/3054 5/1527 1814 3626 9352 6/2577 6850 7/24743 50342 10/3424463 6936710 11831950 11/2734237 18003275 18415884 25886060 12/8717766 113695906 116465144 13/",
+    limits,
+  )
+  moc_oracle_assert(
+    "cells-26",
+    actual,
+    13,
+    [
+      (34871064, 34871068),
+      (42221568, 42237952),
+      (43747792, 43747808),
+      (100073472, 100139008),
+      (101347328, 101351424),
+      (112230400, 112246784),
+      (118882304, 118947840),
+      (134217728, 201326592),
+      (206200832, 206204928),
+      (219165632, 219165696),
+      (237633536, 237699072),
+      (288052400, 288052416),
+      (294654144, 294654160),
+      (414176960, 414176976),
+      (419430400, 423624704),
+      (443949440, 443949504),
+      (454783624, 454783628),
+      (465860576, 465860580),
+      (536870912, 603979776),
+      (612892672, 612958208),
+      (666894336, 671088640),
+      (692060160, 696254464),
+      (725614592, 729808896),
+      (732954624, 734003200),
+      (757244800, 757244864),
+      (800587776, 800849920),
+    ],
+    [
+      6, 12, 164, 223, 229, 237, 955, 4078, 5623, 5910, 7722, 13448, 18961, 23234,
+      90279, 115878, 7618767, 11131014, 16026254, 19511453, 34780491, 35193100, 42663276,
+      75826630, 180804770, 183574008,
+    ],
+    "0/2 8 2/100 159 165 173 3/699 4/3054 5/1527 1814 3626 9352 6/2577 6850 7/24743 50342 10/3424463 6936710 11831950 11/2734237 18003275 18415884 25886060 12/8717766 113695906 116465144 13/",
+    "{\"0\":[2,8],\"2\":[100,159,165,173],\"3\":[699],\"4\":[3054],\"5\":[1527,1814,3626,9352],\"6\":[2577,6850],\"7\":[24743,50342],\"10\":[3424463,6936710,11831950],\"11\":[2734237,18003275,18415884,25886060],\"12\":[8717766,113695906,116465144],\"13\":[]}",
+  )
+}
+
+///|
+test "moc oracle JSON cells-26" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii(
+    "0/2 8 2/100 159 165 173 3/699 4/3054 5/1527 1814 3626 9352 6/2577 6850 7/24743 50342 10/3424463 6936710 11831950 11/2734237 18003275 18415884 25886060 12/8717766 113695906 116465144 13/",
+    limits,
+  )
+  let json = Moc::from_json(
+    "{\n  \"0\": [2, 8],\n  \"2\": [100, 159, 165, 173],\n  \"3\": [699],\n  \"4\": [3054],\n  \"5\": [1527, 1814, 3626, 9352],\n  \"6\": [2577, 6850],\n  \"7\": [24743, 50342],\n  \"10\": [3424463, 6936710, 11831950],\n  \"11\": [2734237, 18003275, 18415884, 25886060],\n  \"12\": [8717766, 113695906, 116465144],\n  \"13\": []\n}",
+    limits,
+  )
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle normalize cells-26" {
+  let limits = MocLimits::default()
+  let cells = [
+    Cell::new(Grid::from_level(2), 173),
+    Cell::new(Grid::from_level(12), 8717766),
+    Cell::new(Grid::from_level(5), 3626),
+    Cell::new(Grid::from_level(12), 142429081),
+    Cell::new(Grid::from_level(10), 11831950),
+    Cell::new(Grid::from_level(2), 100),
+    Cell::new(Grid::from_level(4), 2068),
+    Cell::new(Grid::from_level(11), 18003275),
+    Cell::new(Grid::from_level(6), 8447),
+    Cell::new(Grid::from_level(0), 2),
+    Cell::new(Grid::from_level(10), 6936710),
+    Cell::new(Grid::from_level(10), 3424463),
+    Cell::new(Grid::from_level(2), 165),
+    Cell::new(Grid::from_level(11), 34864880),
+    Cell::new(Grid::from_level(12), 113695906),
+    Cell::new(Grid::from_level(4), 3054),
+    Cell::new(Grid::from_level(11), 9407309),
+    Cell::new(Grid::from_level(10), 2447655),
+    Cell::new(Grid::from_level(7), 50342),
+    Cell::new(Grid::from_level(11), 18415884),
+    Cell::new(Grid::from_level(5), 1527),
+    Cell::new(Grid::from_level(5), 1814),
+    Cell::new(Grid::from_level(8), 532179),
+    Cell::new(Grid::from_level(11), 25886060),
+    Cell::new(Grid::from_level(6), 6850),
+    Cell::new(Grid::from_level(0), 8),
+    Cell::new(Grid::from_level(13), 583951135),
+    Cell::new(Grid::from_level(11), 2734237),
+    Cell::new(Grid::from_level(5), 9352),
+    Cell::new(Grid::from_level(2), 159),
+    Cell::new(Grid::from_level(6), 2577),
+    Cell::new(Grid::from_level(3), 699),
+    Cell::new(Grid::from_level(7), 24743),
+    Cell::new(Grid::from_level(12), 116465144),
+  ]
+  let actual = Moc::from_cells(cells, 13, limits)
+  let expected = Moc::from_ascii(
+    "0/2 8 2/100 159 165 173 3/699 4/3054 5/1527 1814 3626 9352 6/2577 6850 7/24743 50342 10/3424463 6936710 11831950 11/2734237 18003275 18415884 25886060 12/8717766 113695906 116465144 13/",
+    limits,
+  )
+  assert_true(actual.equals(expected))
+  assert_eq(actual.max_order(), expected.max_order())
+}
+
+///|
+test "moc oracle cells-27" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii(
+    "0/6-8 2/94 3/132 316 4/173 2355 5/10637 6/42190 7/183628 10/", limits,
+  )
+  moc_oracle_assert(
+    "cells-27",
+    actual,
+    10,
+    [
+      (45350912, 45613056),
+      (138412032, 139460608),
+      (331350016, 332398592),
+      (394264576, 398458880),
+      (402653184, 603979776),
+      (617349120, 617611264),
+      (691240960, 691257344),
+      (697106432, 697171968),
+      (752140288, 752144384),
+    ],
+    [10, 11, 12, 158, 388, 572, 1197, 3379, 14733, 58574, 249164],
+    "0/6-8 2/94 3/132 316 4/173 2355 5/10637 6/42190 7/183628 10/",
+    "{\"0\":[6,7,8],\"2\":[94],\"3\":[132,316],\"4\":[173,2355],\"5\":[10637],\"6\":[42190],\"7\":[183628],\"10\":[]}",
+  )
+}
+
+///|
+test "moc oracle JSON cells-27" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii(
+    "0/6-8 2/94 3/132 316 4/173 2355 5/10637 6/42190 7/183628 10/", limits,
+  )
+  let json = Moc::from_json(
+    "{\n  \"0\": [6, 7, 8],\n  \"2\": [94],\n  \"3\": [132, 316],\n  \"4\": [173, 2355],\n  \"5\": [10637],\n  \"6\": [42190],\n  \"7\": [183628],\n  \"10\": []\n}",
+    limits,
+  )
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle normalize cells-27" {
+  let limits = MocLimits::default()
+  let cells = [
+    Cell::new(Grid::from_level(2), 94),
+    Cell::new(Grid::from_level(6), 42190),
+    Cell::new(Grid::from_level(3), 132),
+    Cell::new(Grid::from_level(0), 8),
+    Cell::new(Grid::from_level(10), 6578326),
+    Cell::new(Grid::from_level(4), 2355),
+    Cell::new(Grid::from_level(0), 7),
+    Cell::new(Grid::from_level(3), 316),
+    Cell::new(Grid::from_level(4), 173),
+    Cell::new(Grid::from_level(5), 7626),
+    Cell::new(Grid::from_level(3), 430),
+    Cell::new(Grid::from_level(7), 183628),
+    Cell::new(Grid::from_level(5), 10637),
+    Cell::new(Grid::from_level(0), 6),
+  ]
+  let actual = Moc::from_cells(cells, 10, limits)
+  let expected = Moc::from_ascii(
+    "0/6-8 2/94 3/132 316 4/173 2355 5/10637 6/42190 7/183628 10/", limits,
+  )
+  assert_true(actual.equals(expected))
+  assert_eq(actual.max_order(), expected.max_order())
+}
+
+///|
+test "moc oracle cells-28" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii("0/1 5 7-11 1/3 10 12 24", limits)
+  moc_oracle_assert(
+    "cells-28",
+    actual,
+    1,
+    [
+      (50331648, 134217728),
+      (167772160, 184549376),
+      (201326592, 218103808),
+      (335544320, 419430400),
+      (469762048, 805306368),
+    ],
+    [5, 9, 11, 12, 13, 14, 15, 19, 26, 28, 40],
+    "0/1 5 7-11 1/3 10 12 24",
+    "{\"0\":[1,5,7,8,9,10,11],\"1\":[3,10,12,24]}",
+  )
+}
+
+///|
+test "moc oracle JSON cells-28" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii("0/1 5 7-11 1/3 10 12 24", limits)
+  let json = Moc::from_json(
+    "{\n  \"0\": [1, 5, 7, 8, 9, 10, 11],\n  \"1\": [3, 10, 12, 24]\n}", limits,
+  )
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle normalize cells-28" {
+  let limits = MocLimits::default()
+  let cells = [
+    Cell::new(Grid::from_level(0), 5),
+    Cell::new(Grid::from_level(0), 11),
+    Cell::new(Grid::from_level(0), 8),
+    Cell::new(Grid::from_level(1), 43),
+    Cell::new(Grid::from_level(1), 22),
+    Cell::new(Grid::from_level(1), 32),
+    Cell::new(Grid::from_level(0), 10),
+    Cell::new(Grid::from_level(0), 11),
+    Cell::new(Grid::from_level(0), 1),
+    Cell::new(Grid::from_level(1), 21),
+    Cell::new(Grid::from_level(1), 12),
+    Cell::new(Grid::from_level(0), 11),
+    Cell::new(Grid::from_level(1), 24),
+    Cell::new(Grid::from_level(1), 3),
+    Cell::new(Grid::from_level(1), 24),
+    Cell::new(Grid::from_level(1), 34),
+    Cell::new(Grid::from_level(1), 22),
+    Cell::new(Grid::from_level(0), 11),
+    Cell::new(Grid::from_level(0), 10),
+    Cell::new(Grid::from_level(1), 42),
+    Cell::new(Grid::from_level(1), 33),
+    Cell::new(Grid::from_level(0), 10),
+    Cell::new(Grid::from_level(0), 5),
+    Cell::new(Grid::from_level(0), 8),
+    Cell::new(Grid::from_level(0), 10),
+    Cell::new(Grid::from_level(0), 7),
+    Cell::new(Grid::from_level(1), 35),
+    Cell::new(Grid::from_level(1), 32),
+    Cell::new(Grid::from_level(0), 9),
+    Cell::new(Grid::from_level(1), 41),
+    Cell::new(Grid::from_level(0), 8),
+    Cell::new(Grid::from_level(0), 10),
+    Cell::new(Grid::from_level(1), 10),
+    Cell::new(Grid::from_level(1), 34),
+    Cell::new(Grid::from_level(1), 7),
+    Cell::new(Grid::from_level(0), 11),
+  ]
+  let actual = Moc::from_cells(cells, 1, limits)
+  let expected = Moc::from_ascii("0/1 5 7-11 1/3 10 12 24", limits)
+  assert_true(actual.equals(expected))
+  assert_eq(actual.max_order(), expected.max_order())
+}
+
+///|
+test "moc oracle cells-29" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii("3/120 4/", limits)
+  moc_oracle_assert(
+    "cells-29",
+    actual,
+    4,
+    [(125829120, 126877696)],
+    [376],
+    "3/120 4/",
+    "{\"3\":[120],\"4\":[]}",
+  )
+}
+
+///|
+test "moc oracle JSON cells-29" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii("3/120 4/", limits)
+  let json = Moc::from_json("{\n  \"3\": [120],\n  \"4\": []\n}", limits)
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle normalize cells-29" {
+  let limits = MocLimits::default()
+  let cells = [Cell::new(Grid::from_level(3), 120)]
+  let actual = Moc::from_cells(cells, 4, limits)
+  let expected = Moc::from_ascii("3/120 4/", limits)
+  assert_true(actual.equals(expected))
+  assert_eq(actual.max_order(), expected.max_order())
+}
+
+///|
+test "moc oracle cells-30" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii(
+    "0/10-11 1/38 2/33 40 114 3/17 362 506 547 4/16 306 1007 1180 5/1705 3856 5407 5688 6/5413 13823 19738 21899 34238 7/6766 19290 52823 115390 122694 126406 130499 148210 8/286836 430550 9/672841 962514 995187 1597413 10/4577974 7040543 11/11315749 20574314 21261985 33422855 12/85731980 113225865 129321353 144616037 13/364756314 562006149 630545274",
+    limits,
+  )
+  moc_oracle_assert(
+    "cells-30",
+    actual,
+    13,
+    [
+      (4194304, 4456448),
+      (17825792, 18874368),
+      (27713536, 27717632),
+      (79011840, 79015936),
+      (80216064, 80478208),
+      (88686592, 88702976),
+      (111738880, 111804416),
+      (138412032, 142606336),
+      (167772160, 171966464),
+      (172247296, 172247552),
+      (181051984, 181052000),
+      (216363008, 216367104),
+      (226476032, 226492416),
+      (246403584, 246403840),
+      (252706816, 252772352),
+      (254767872, 254768128),
+      (263979008, 264241152),
+      (292990336, 292990400),
+      (293720064, 293721088),
+      (309329920, 309592064),
+      (323387392, 323403776),
+      (329189024, 329189040),
+      (340191760, 340191776),
+      (342927920, 342927924),
+      (354353152, 354418688),
+      (358793216, 358809600),
+      (364756314, 364756315),
+      (372768768, 372834304),
+      (379584512, 380633088),
+      (408937728, 408937984),
+      (440883200, 440884224),
+      (450594752, 450594816),
+      (452903460, 452903464),
+      (472637440, 472641536),
+      (478150656, 482344960),
+      (502554624, 502558720),
+      (517285412, 517285416),
+      (517758976, 517763072),
+      (530579456, 531628032),
+      (534523904, 534528000),
+      (534765680, 534765696),
+      (560955392, 560971776),
+      (562006149, 562006150),
+      (573571072, 574619648),
+      (578464148, 578464152),
+      (607068160, 607072256),
+      (630545274, 630545275),
+      (637534208, 654311424),
+      (671088640, 805306368),
+    ],
+    [
+      14, 15, 54, 97, 104, 178, 273, 618, 762, 803, 1040, 1330, 2031, 2204, 5801,
+      7952, 9503, 9784, 21797, 30207, 36122, 38283, 50622, 72302, 84826, 118359,
+      180926, 188230, 191942, 196035, 213746, 548980, 692694, 1721417, 2011090, 2043763,
+      2645989, 8772278, 11234847, 28092965, 37351530, 38039201, 50200071, 152840844,
+      180334729, 196430217, 211724901, 633191770, 830441605, 898980730,
+    ],
+    "0/10-11 1/38 2/33 40 114 3/17 362 506 547 4/16 306 1007 1180 5/1705 3856 5407 5688 6/5413 13823 19738 21899 34238 7/6766 19290 52823 115390 122694 126406 130499 148210 8/286836 430550 9/672841 962514 995187 1597413 10/4577974 7040543 11/11315749 20574314 21261985 33422855 12/85731980 113225865 129321353 144616037 13/364756314 562006149 630545274",
+    "{\"0\":[10,11],\"1\":[38],\"2\":[33,40,114],\"3\":[17,362,506,547],\"4\":[16,306,1007,1180],\"5\":[1705,3856,5407,5688],\"6\":[5413,13823,19738,21899,34238],\"7\":[6766,19290,52823,115390,122694,126406,130499,148210],\"8\":[286836,430550],\"9\":[672841,962514,995187,1597413],\"10\":[4577974,7040543],\"11\":[11315749,20574314,21261985,33422855],\"12\":[85731980,113225865,129321353,144616037],\"13\":[364756314,562006149,630545274]}",
+  )
+}
+
+///|
+test "moc oracle JSON cells-30" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii(
+    "0/10-11 1/38 2/33 40 114 3/17 362 506 547 4/16 306 1007 1180 5/1705 3856 5407 5688 6/5413 13823 19738 21899 34238 7/6766 19290 52823 115390 122694 126406 130499 148210 8/286836 430550 9/672841 962514 995187 1597413 10/4577974 7040543 11/11315749 20574314 21261985 33422855 12/85731980 113225865 129321353 144616037 13/364756314 562006149 630545274",
+    limits,
+  )
+  let json = Moc::from_json(
+    "{\n  \"0\": [10, 11],\n  \"1\": [38],\n  \"2\": [33, 40, 114],\n  \"3\": [17, 362, 506, 547],\n  \"4\": [16, 306, 1007, 1180],\n  \"5\": [1705, 3856, 5407, 5688],\n  \"6\": [5413, 13823, 19738, 21899, 34238],\n  \"7\": [6766, 19290, 52823, 115390, 122694, 126406, 130499, 148210],\n  \"8\": [286836, 430550],\n  \"9\": [672841, 962514, 995187, 1597413],\n  \"10\": [4577974, 7040543],\n  \"11\": [11315749, 20574314, 21261985, 33422855],\n  \"12\": [85731980, 113225865, 129321353, 144616037],\n  \"13\": [364756314, 562006149, 630545274]\n}",
+    limits,
+  )
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle normalize cells-30" {
+  let limits = MocLimits::default()
+  let cells = [
+    Cell::new(Grid::from_level(8), 430550),
+    Cell::new(Grid::from_level(10), 2649330),
+    Cell::new(Grid::from_level(9), 962514),
+    Cell::new(Grid::from_level(5), 1705),
+    Cell::new(Grid::from_level(13), 364756314),
+    Cell::new(Grid::from_level(3), 506),
+    Cell::new(Grid::from_level(11), 44663443),
+    Cell::new(Grid::from_level(7), 122694),
+    Cell::new(Grid::from_level(12), 113225865),
+    Cell::new(Grid::from_level(5), 3856),
+    Cell::new(Grid::from_level(11), 10506477),
+    Cell::new(Grid::from_level(8), 286836),
+    Cell::new(Grid::from_level(3), 362),
+    Cell::new(Grid::from_level(9), 2525812),
+    Cell::new(Grid::from_level(10), 4577974),
+    Cell::new(Grid::from_level(7), 130499),
+    Cell::new(Grid::from_level(12), 85731980),
+    Cell::new(Grid::from_level(3), 614),
+    Cell::new(Grid::from_level(13), 751464946),
+    Cell::new(Grid::from_level(5), 5407),
+    Cell::new(Grid::from_level(5), 5688),
+    Cell::new(Grid::from_level(5), 10424),
+    Cell::new(Grid::from_level(7), 115390),
+    Cell::new(Grid::from_level(13), 630545274),
+    Cell::new(Grid::from_level(12), 129321353),
+    Cell::new(Grid::from_level(10), 7040543),
+    Cell::new(Grid::from_level(2), 40),
+    Cell::new(Grid::from_level(9), 1597413),
+    Cell::new(Grid::from_level(7), 148210),
+    Cell::new(Grid::from_level(5), 10869),
+    Cell::new(Grid::from_level(1), 38),
+    Cell::new(Grid::from_level(11), 21261985),
+    Cell::new(Grid::from_level(2), 33),
+    Cell::new(Grid::from_level(9), 672841),
+    Cell::new(Grid::from_level(11), 33422855),
+    Cell::new(Grid::from_level(3), 17),
+    Cell::new(Grid::from_level(4), 2464),
+    Cell::new(Grid::from_level(1), 46),
+    Cell::new(Grid::from_level(13), 562006149),
+    Cell::new(Grid::from_level(7), 52823),
+    Cell::new(Grid::from_level(5), 12263),
+    Cell::new(Grid::from_level(7), 6766),
+    Cell::new(Grid::from_level(4), 1007),
+    Cell::new(Grid::from_level(6), 21899),
+    Cell::new(Grid::from_level(11), 11315749),
+    Cell::new(Grid::from_level(4), 306),
+    Cell::new(Grid::from_level(5), 11735),
+    Cell::new(Grid::from_level(6), 47173),
+    Cell::new(Grid::from_level(4), 1180),
+    Cell::new(Grid::from_level(6), 19738),
+    Cell::new(Grid::from_level(0), 11),
+    Cell::new(Grid::from_level(3), 547),
+    Cell::new(Grid::from_level(6), 13823),
+    Cell::new(Grid::from_level(10), 2197241),
+    Cell::new(Grid::from_level(6), 34238),
+    Cell::new(Grid::from_level(0), 10),
+    Cell::new(Grid::from_level(9), 995187),
+    Cell::new(Grid::from_level(12), 144616037),
+    Cell::new(Grid::from_level(11), 20574314),
+    Cell::new(Grid::from_level(2), 114),
+    Cell::new(Grid::from_level(6), 5413),
+    Cell::new(Grid::from_level(7), 126406),
+    Cell::new(Grid::from_level(7), 19290),
+    Cell::new(Grid::from_level(4), 16),
+  ]
+  let actual = Moc::from_cells(cells, 13, limits)
+  let expected = Moc::from_ascii(
+    "0/10-11 1/38 2/33 40 114 3/17 362 506 547 4/16 306 1007 1180 5/1705 3856 5407 5688 6/5413 13823 19738 21899 34238 7/6766 19290 52823 115390 122694 126406 130499 148210 8/286836 430550 9/672841 962514 995187 1597413 10/4577974 7040543 11/11315749 20574314 21261985 33422855 12/85731980 113225865 129321353 144616037 13/364756314 562006149 630545274",
+    limits,
+  )
+  assert_true(actual.equals(expected))
+  assert_eq(actual.max_order(), expected.max_order())
+}
+
+///|
+test "moc oracle cells-31" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii(
+    "0/1 5 1/15 27 40-41 2/46 97 104 114 126 182", limits,
+  )
+  moc_oracle_assert(
+    "cells-31",
+    actual,
+    2,
+    [
+      (67108864, 134217728),
+      (192937984, 197132288),
+      (251658240, 268435456),
+      (335544320, 402653184),
+      (406847488, 411041792),
+      (436207616, 440401920),
+      (452984832, 469762048),
+      (478150656, 482344960),
+      (528482304, 532676608),
+      (671088640, 704643072),
+      (763363328, 767557632),
+    ],
+    [5, 9, 31, 43, 56, 57, 110, 161, 168, 178, 190, 246],
+    "0/1 5 1/15 27 40-41 2/46 97 104 114 126 182",
+    "{\"0\":[1,5],\"1\":[15,27,40,41],\"2\":[46,97,104,114,126,182]}",
+  )
+}
+
+///|
+test "moc oracle JSON cells-31" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii(
+    "0/1 5 1/15 27 40-41 2/46 97 104 114 126 182", limits,
+  )
+  let json = Moc::from_json(
+    "{\n  \"0\": [1, 5],\n  \"1\": [15, 27, 40, 41],\n  \"2\": [46, 97, 104, 114, 126, 182]\n}",
+    limits,
+  )
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle normalize cells-31" {
+  let limits = MocLimits::default()
+  let cells = [
+    Cell::new(Grid::from_level(0), 5),
+    Cell::new(Grid::from_level(2), 160),
+    Cell::new(Grid::from_level(2), 126),
+    Cell::new(Grid::from_level(1), 40),
+    Cell::new(Grid::from_level(2), 104),
+    Cell::new(Grid::from_level(1), 41),
+    Cell::new(Grid::from_level(2), 114),
+    Cell::new(Grid::from_level(0), 5),
+    Cell::new(Grid::from_level(2), 46),
+    Cell::new(Grid::from_level(2), 182),
+    Cell::new(Grid::from_level(1), 27),
+    Cell::new(Grid::from_level(0), 5),
+    Cell::new(Grid::from_level(2), 97),
+    Cell::new(Grid::from_level(1), 15),
+    Cell::new(Grid::from_level(0), 1),
+  ]
+  let actual = Moc::from_cells(cells, 2, limits)
+  let expected = Moc::from_ascii(
+    "0/1 5 1/15 27 40-41 2/46 97 104 114 126 182", limits,
+  )
+  assert_true(actual.equals(expected))
+  assert_eq(actual.max_order(), expected.max_order())
+}
+
+///|
+test "moc oracle cells-32" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii(
+    "1/23 38 2/36 3/75 425 4/1 7/50645 84418 140018 8/157280 9/1821062", limits,
+  )
+  moc_oracle_assert(
+    "cells-32",
+    actual,
+    9,
+    [
+      (262144, 524288),
+      (78643200, 79691776),
+      (150994944, 155189248),
+      (161054720, 161055744),
+      (207441920, 207446016),
+      (345776128, 345780224),
+      (385875968, 402653184),
+      (445644800, 446693376),
+      (466191872, 466192128),
+      (573513728, 573517824),
+      (637534208, 654311424),
+    ],
+    [39, 54, 100, 331, 681, 1025, 116181, 149954, 205554, 419424, 2869638],
+    "1/23 38 2/36 3/75 425 4/1 7/50645 84418 140018 8/157280 9/1821062",
+    "{\"1\":[23,38],\"2\":[36],\"3\":[75,425],\"4\":[1],\"7\":[50645,84418,140018],\"8\":[157280],\"9\":[1821062]}",
+  )
+}
+
+///|
+test "moc oracle JSON cells-32" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii(
+    "1/23 38 2/36 3/75 425 4/1 7/50645 84418 140018 8/157280 9/1821062", limits,
+  )
+  let json = Moc::from_json(
+    "{\n  \"1\": [23, 38],\n  \"2\": [36],\n  \"3\": [75, 425],\n  \"4\": [1],\n  \"7\": [50645, 84418, 140018],\n  \"8\": [157280],\n  \"9\": [1821062]\n}",
+    limits,
+  )
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle normalize cells-32" {
+  let limits = MocLimits::default()
+  let cells = [
+    Cell::new(Grid::from_level(9), 1821062),
+    Cell::new(Grid::from_level(3), 425),
+    Cell::new(Grid::from_level(4), 1),
+    Cell::new(Grid::from_level(2), 36),
+    Cell::new(Grid::from_level(3), 75),
+    Cell::new(Grid::from_level(1), 38),
+    Cell::new(Grid::from_level(7), 50645),
+    Cell::new(Grid::from_level(8), 157280),
+    Cell::new(Grid::from_level(1), 23),
+    Cell::new(Grid::from_level(7), 140018),
+    Cell::new(Grid::from_level(7), 84418),
+  ]
+  let actual = Moc::from_cells(cells, 9, limits)
+  let expected = Moc::from_ascii(
+    "1/23 38 2/36 3/75 425 4/1 7/50645 84418 140018 8/157280 9/1821062", limits,
+  )
+  assert_true(actual.equals(expected))
+  assert_eq(actual.max_order(), expected.max_order())
+}
+
+///|
+test "moc oracle cells-33" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii(
+    "0/1 3-4 9 1/8 45 2/1 109 160 179 3/392 4/1447 5/6157 7157 7210 10836 11046 6/10320 7/118471 193792 194592 8/374428",
+    limits,
+  )
+  moc_oracle_assert(
+    "cells-33",
+    actual,
+    8,
+    [
+      (4194304, 8388608),
+      (67108864, 150994944),
+      (169082880, 169099264),
+      (201326592, 335544320),
+      (379322368, 379584512),
+      (383414272, 383415296),
+      (403505152, 403570688),
+      (411041792, 412090368),
+      (457179136, 461373440),
+      (469041152, 469106688),
+      (472514560, 472580096),
+      (485257216, 485261312),
+      (603979776, 675282944),
+      (710148096, 710213632),
+      (723910656, 723976192),
+      (750780416, 771751936),
+      (793772032, 793776128),
+      (797048832, 797052928),
+    ],
+    [
+      5, 7, 8, 13, 24, 61, 65, 173, 224, 243, 648, 2471, 10253, 11253, 11306, 14932,
+      15142, 26704, 184007, 259328, 260128, 636572,
+    ],
+    "0/1 3-4 9 1/8 45 2/1 109 160 179 3/392 4/1447 5/6157 7157 7210 10836 11046 6/10320 7/118471 193792 194592 8/374428",
+    "{\"0\":[1,3,4,9],\"1\":[8,45],\"2\":[1,109,160,179],\"3\":[392],\"4\":[1447],\"5\":[6157,7157,7210,10836,11046],\"6\":[10320],\"7\":[118471,193792,194592],\"8\":[374428]}",
+  )
+}
+
+///|
+test "moc oracle JSON cells-33" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii(
+    "0/1 3-4 9 1/8 45 2/1 109 160 179 3/392 4/1447 5/6157 7157 7210 10836 11046 6/10320 7/118471 193792 194592 8/374428",
+    limits,
+  )
+  let json = Moc::from_json(
+    "{\n  \"0\": [1, 3, 4, 9],\n  \"1\": [8, 45],\n  \"2\": [1, 109, 160, 179],\n  \"3\": [392],\n  \"4\": [1447],\n  \"5\": [6157, 7157, 7210, 10836, 11046],\n  \"6\": [10320],\n  \"7\": [118471, 193792, 194592],\n  \"8\": [374428]\n}",
+    limits,
+  )
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle normalize cells-33" {
+  let limits = MocLimits::default()
+  let cells = [
+    Cell::new(Grid::from_level(0), 1),
+    Cell::new(Grid::from_level(2), 160),
+    Cell::new(Grid::from_level(5), 6157),
+    Cell::new(Grid::from_level(0), 4),
+    Cell::new(Grid::from_level(0), 1),
+    Cell::new(Grid::from_level(1), 45),
+    Cell::new(Grid::from_level(4), 1035),
+    Cell::new(Grid::from_level(7), 193792),
+    Cell::new(Grid::from_level(8), 640488),
+    Cell::new(Grid::from_level(2), 179),
+    Cell::new(Grid::from_level(5), 11046),
+    Cell::new(Grid::from_level(6), 10320),
+    Cell::new(Grid::from_level(8), 374428),
+    Cell::new(Grid::from_level(5), 10836),
+    Cell::new(Grid::from_level(0), 3),
+    Cell::new(Grid::from_level(5), 7210),
+    Cell::new(Grid::from_level(6), 19060),
+    Cell::new(Grid::from_level(5), 1284),
+    Cell::new(Grid::from_level(8), 603274),
+    Cell::new(Grid::from_level(5), 7157),
+    Cell::new(Grid::from_level(7), 118471),
+    Cell::new(Grid::from_level(3), 392),
+    Cell::new(Grid::from_level(1), 6),
+    Cell::new(Grid::from_level(1), 8),
+    Cell::new(Grid::from_level(3), 579),
+    Cell::new(Grid::from_level(2), 77),
+    Cell::new(Grid::from_level(4), 789),
+    Cell::new(Grid::from_level(7), 194592),
+    Cell::new(Grid::from_level(2), 60),
+    Cell::new(Grid::from_level(2), 109),
+    Cell::new(Grid::from_level(4), 1447),
+    Cell::new(Grid::from_level(3), 293),
+    Cell::new(Grid::from_level(0), 9),
+    Cell::new(Grid::from_level(2), 1),
+    Cell::new(Grid::from_level(8), 68878),
+  ]
+  let actual = Moc::from_cells(cells, 8, limits)
+  let expected = Moc::from_ascii(
+    "0/1 3-4 9 1/8 45 2/1 109 160 179 3/392 4/1447 5/6157 7157 7210 10836 11046 6/10320 7/118471 193792 194592 8/374428",
+    limits,
+  )
+  assert_true(actual.equals(expected))
+  assert_eq(actual.max_order(), expected.max_order())
+}
+
+///|
+test "moc oracle cells-34" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii(
+    "0/1 5-7 1/3 10 40 42 47 2/55 63 78 128 3/9 17 301 304 599 4/859 1065 1152 5/63 544 3620 9549 6/13282 14852 19537 33438 37430 39296",
+    limits,
+  )
+  moc_oracle_assert(
+    "cells-34",
+    actual,
+    6,
+    [
+      (4128768, 4194304),
+      (9437184, 10485760),
+      (17825792, 18874368),
+      (35651584, 35717120),
+      (50331648, 134217728),
+      (167772160, 184549376),
+      (217612288, 217628672),
+      (225181696, 225443840),
+      (230686720, 234881024),
+      (237240320, 237305856),
+      (243335168, 243351552),
+      (264241152, 268435456),
+      (279183360, 279445504),
+      (301989888, 302252032),
+      (315621376, 316669952),
+      (318767104, 319815680),
+      (320094208, 320110592),
+      (327155712, 331350016),
+      (335544320, 541065216),
+      (547848192, 547864576),
+      (613253120, 613269504),
+      (625803264, 625868800),
+      (628097024, 629145600),
+      (643825664, 643842048),
+      (671088640, 687865856),
+      (704643072, 721420288),
+      (788529152, 805306368),
+    ],
+    [
+      5, 9, 10, 11, 19, 26, 56, 58, 63, 119, 127, 142, 192, 265, 273, 557, 560, 855,
+      1883, 2089, 2176, 4159, 4640, 7716, 13645, 29666, 31236, 35921, 49822, 53814,
+      55680,
+    ],
+    "0/1 5-7 1/3 10 40 42 47 2/55 63 78 128 3/9 17 301 304 599 4/859 1065 1152 5/63 544 3620 9549 6/13282 14852 19537 33438 37430 39296",
+    "{\"0\":[1,5,6,7],\"1\":[3,10,40,42,47],\"2\":[55,63,78,128],\"3\":[9,17,301,304,599],\"4\":[859,1065,1152],\"5\":[63,544,3620,9549],\"6\":[13282,14852,19537,33438,37430,39296]}",
+  )
+}
+
+///|
+test "moc oracle JSON cells-34" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii(
+    "0/1 5-7 1/3 10 40 42 47 2/55 63 78 128 3/9 17 301 304 599 4/859 1065 1152 5/63 544 3620 9549 6/13282 14852 19537 33438 37430 39296",
+    limits,
+  )
+  let json = Moc::from_json(
+    "{\n  \"0\": [1, 5, 6, 7],\n  \"1\": [3, 10, 40, 42, 47],\n  \"2\": [55, 63, 78, 128],\n  \"3\": [9, 17, 301, 304, 599],\n  \"4\": [859, 1065, 1152],\n  \"5\": [63, 544, 3620, 9549],\n  \"6\": [13282, 14852, 19537, 33438, 37430, 39296]\n}",
+    limits,
+  )
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle normalize cells-34" {
+  let limits = MocLimits::default()
+  let cells = [
+    Cell::new(Grid::from_level(4), 1773),
+    Cell::new(Grid::from_level(0), 6),
+    Cell::new(Grid::from_level(3), 17),
+    Cell::new(Grid::from_level(6), 11179),
+    Cell::new(Grid::from_level(2), 78),
+    Cell::new(Grid::from_level(2), 97),
+    Cell::new(Grid::from_level(5), 3620),
+    Cell::new(Grid::from_level(2), 128),
+    Cell::new(Grid::from_level(4), 859),
+    Cell::new(Grid::from_level(0), 1),
+    Cell::new(Grid::from_level(1), 7),
+    Cell::new(Grid::from_level(1), 10),
+    Cell::new(Grid::from_level(6), 13282),
+    Cell::new(Grid::from_level(5), 63),
+    Cell::new(Grid::from_level(6), 14852),
+    Cell::new(Grid::from_level(3), 126),
+    Cell::new(Grid::from_level(6), 25660),
+    Cell::new(Grid::from_level(6), 7511),
+    Cell::new(Grid::from_level(5), 544),
+    Cell::new(Grid::from_level(6), 39296),
+    Cell::new(Grid::from_level(1), 42),
+    Cell::new(Grid::from_level(1), 47),
+    Cell::new(Grid::from_level(5), 9549),
+    Cell::new(Grid::from_level(4), 1010),
+    Cell::new(Grid::from_level(5), 10351),
+    Cell::new(Grid::from_level(3), 9),
+    Cell::new(Grid::from_level(6), 23227),
+    Cell::new(Grid::from_level(2), 27),
+    Cell::new(Grid::from_level(3), 348),
+    Cell::new(Grid::from_level(4), 1065),
+    Cell::new(Grid::from_level(1), 24),
+    Cell::new(Grid::from_level(2), 109),
+    Cell::new(Grid::from_level(6), 19537),
+    Cell::new(Grid::from_level(0), 7),
+    Cell::new(Grid::from_level(6), 48879),
+    Cell::new(Grid::from_level(1), 40),
+    Cell::new(Grid::from_level(1), 3),
+    Cell::new(Grid::from_level(5), 5737),
+    Cell::new(Grid::from_level(1), 27),
+    Cell::new(Grid::from_level(3), 503),
+    Cell::new(Grid::from_level(6), 33438),
+    Cell::new(Grid::from_level(4), 1152),
+    Cell::new(Grid::from_level(3), 599),
+    Cell::new(Grid::from_level(6), 4122),
+    Cell::new(Grid::from_level(3), 301),
+    Cell::new(Grid::from_level(1), 42),
+    Cell::new(Grid::from_level(2), 63),
+    Cell::new(Grid::from_level(3), 304),
+    Cell::new(Grid::from_level(6), 5303),
+    Cell::new(Grid::from_level(2), 55),
+    Cell::new(Grid::from_level(6), 37430),
+    Cell::new(Grid::from_level(2), 82),
+    Cell::new(Grid::from_level(0), 5),
+  ]
+  let actual = Moc::from_cells(cells, 6, limits)
+  let expected = Moc::from_ascii(
+    "0/1 5-7 1/3 10 40 42 47 2/55 63 78 128 3/9 17 301 304 599 4/859 1065 1152 5/63 544 3620 9549 6/13282 14852 19537 33438 37430 39296",
+    limits,
+  )
+  assert_true(actual.equals(expected))
+  assert_eq(actual.max_order(), expected.max_order())
+}
+
+///|
+test "moc oracle cells-35" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii(
+    "0/3 9 2/28 3/306 4/1595 6/12255 25246 7/125829 9/208679 1702072 11/2558286 44374727",
+    limits,
+  )
+  moc_oracle_assert(
+    "cells-35",
+    actual,
+    11,
+    [
+      (40932576, 40932592),
+      (53421824, 53422080),
+      (117440512, 121634816),
+      (200785920, 200802304),
+      (201326592, 268435456),
+      (320864256, 321912832),
+      (413630464, 413646848),
+      (418119680, 418381824),
+      (435730432, 435730688),
+      (515395584, 515399680),
+      (603979776, 671088640),
+      (709995632, 709995648),
+    ],
+    [
+      7, 13, 92, 562, 2619, 28639, 41630, 191365, 1257255, 2750648, 19335502, 61151943,
+    ],
+    "0/3 9 2/28 3/306 4/1595 6/12255 25246 7/125829 9/208679 1702072 11/2558286 44374727",
+    "{\"0\":[3,9],\"2\":[28],\"3\":[306],\"4\":[1595],\"6\":[12255,25246],\"7\":[125829],\"9\":[208679,1702072],\"11\":[2558286,44374727]}",
+  )
+}
+
+///|
+test "moc oracle JSON cells-35" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii(
+    "0/3 9 2/28 3/306 4/1595 6/12255 25246 7/125829 9/208679 1702072 11/2558286 44374727",
+    limits,
+  )
+  let json = Moc::from_json(
+    "{\n  \"0\": [3, 9],\n  \"2\": [28],\n  \"3\": [306],\n  \"4\": [1595],\n  \"6\": [12255, 25246],\n  \"7\": [125829],\n  \"9\": [208679, 1702072],\n  \"11\": [2558286, 44374727]\n}",
+    limits,
+  )
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle normalize cells-35" {
+  let limits = MocLimits::default()
+  let cells = [
+    Cell::new(Grid::from_level(11), 44374727),
+    Cell::new(Grid::from_level(11), 41408988),
+    Cell::new(Grid::from_level(11), 2558286),
+    Cell::new(Grid::from_level(2), 28),
+    Cell::new(Grid::from_level(9), 208679),
+    Cell::new(Grid::from_level(3), 306),
+    Cell::new(Grid::from_level(4), 1595),
+    Cell::new(Grid::from_level(7), 163701),
+    Cell::new(Grid::from_level(7), 125829),
+    Cell::new(Grid::from_level(0), 9),
+    Cell::new(Grid::from_level(5), 3507),
+    Cell::new(Grid::from_level(6), 25246),
+    Cell::new(Grid::from_level(6), 12255),
+    Cell::new(Grid::from_level(0), 3),
+    Cell::new(Grid::from_level(9), 1702072),
+  ]
+  let actual = Moc::from_cells(cells, 11, limits)
+  let expected = Moc::from_ascii(
+    "0/3 9 2/28 3/306 4/1595 6/12255 25246 7/125829 9/208679 1702072 11/2558286 44374727",
+    limits,
+  )
+  assert_true(actual.equals(expected))
+  assert_eq(actual.max_order(), expected.max_order())
+}
+
+///|
+test "moc oracle cells-36" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii(
+    "1/4-5 18 2/106 145 3/662 4/791 5/5027 8585 6/25035 25290 30509 48319 7/31036 174767 178985 8/25260 139623 549434",
+    limits,
+  )
+  moc_oracle_assert(
+    "cells-36",
+    actual,
+    8,
+    [
+      (25866240, 25867264),
+      (67108864, 100663296),
+      (127123456, 127127552),
+      (142973952, 142974976),
+      (207355904, 207618048),
+      (301989888, 318767104),
+      (329449472, 329515008),
+      (410173440, 410189824),
+      (414351360, 414367744),
+      (444596224, 448790528),
+      (499859456, 499875840),
+      (562620416, 562621440),
+      (562626560, 562692096),
+      (608174080, 612368384),
+      (694157312, 695205888),
+      (715845632, 715849728),
+      (733122560, 733126656),
+      (791658496, 791674880),
+    ],
+    [
+      20, 21, 34, 170, 209, 918, 1815, 9123, 12681, 41419, 41674, 46893, 64703, 96572,
+      240303, 244521, 287404, 401767, 811578,
+    ],
+    "1/4-5 18 2/106 145 3/662 4/791 5/5027 8585 6/25035 25290 30509 48319 7/31036 174767 178985 8/25260 139623 549434",
+    "{\"1\":[4,5,18],\"2\":[106,145],\"3\":[662],\"4\":[791],\"5\":[5027,8585],\"6\":[25035,25290,30509,48319],\"7\":[31036,174767,178985],\"8\":[25260,139623,549434]}",
+  )
+}
+
+///|
+test "moc oracle JSON cells-36" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii(
+    "1/4-5 18 2/106 145 3/662 4/791 5/5027 8585 6/25035 25290 30509 48319 7/31036 174767 178985 8/25260 139623 549434",
+    limits,
+  )
+  let json = Moc::from_json(
+    "{\n  \"1\": [4, 5, 18],\n  \"2\": [106, 145],\n  \"3\": [662],\n  \"4\": [791],\n  \"5\": [5027, 8585],\n  \"6\": [25035, 25290, 30509, 48319],\n  \"7\": [31036, 174767, 178985],\n  \"8\": [25260, 139623, 549434]\n}",
+    limits,
+  )
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle normalize cells-36" {
+  let limits = MocLimits::default()
+  let cells = [
+    Cell::new(Grid::from_level(4), 791),
+    Cell::new(Grid::from_level(5), 8585),
+    Cell::new(Grid::from_level(2), 106),
+    Cell::new(Grid::from_level(1), 18),
+    Cell::new(Grid::from_level(1), 4),
+    Cell::new(Grid::from_level(6), 30509),
+    Cell::new(Grid::from_level(8), 139623),
+    Cell::new(Grid::from_level(7), 31036),
+    Cell::new(Grid::from_level(8), 25260),
+    Cell::new(Grid::from_level(8), 549434),
+    Cell::new(Grid::from_level(1), 5),
+    Cell::new(Grid::from_level(6), 48319),
+    Cell::new(Grid::from_level(7), 178985),
+    Cell::new(Grid::from_level(6), 25035),
+    Cell::new(Grid::from_level(5), 5027),
+    Cell::new(Grid::from_level(3), 662),
+    Cell::new(Grid::from_level(7), 174767),
+    Cell::new(Grid::from_level(6), 25290),
+    Cell::new(Grid::from_level(2), 145),
+  ]
+  let actual = Moc::from_cells(cells, 8, limits)
+  let expected = Moc::from_ascii(
+    "1/4-5 18 2/106 145 3/662 4/791 5/5027 8585 6/25035 25290 30509 48319 7/31036 174767 178985 8/25260 139623 549434",
+    limits,
+  )
+  assert_true(actual.equals(expected))
+  assert_eq(actual.max_order(), expected.max_order())
+}
+
+///|
+test "moc oracle cells-37" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii(
+    "0/8 10 1/6 13 16 22 24 26 28 46 2/15 31 3/4 145 200 483 4/1188 5/2840 6604 9472 10119 6/5581 15591 18384 7/20510 83986 103813 152308 156583 162410 8/257928 320229 513740 9/4353 484065 687352 1151245 1294511 1686032 2468787",
+    limits,
+  )
+  moc_oracle_assert(
+    "cells-37",
+    actual,
+    9,
+    [
+      (1114368, 1114624),
+      (4194304, 5242880),
+      (62914560, 67108864),
+      (84008960, 84013056),
+      (91439104, 91455488),
+      (100663296, 117440512),
+      (123920640, 123920896),
+      (130023424, 134217728),
+      (152043520, 153092096),
+      (175962112, 175962368),
+      (186122240, 186187776),
+      (209715200, 210763776),
+      (218103808, 234881024),
+      (255442944, 255459328),
+      (264118272, 264119296),
+      (268435456, 285212672),
+      (294718720, 294718976),
+      (301203456, 301219840),
+      (311427072, 311689216),
+      (327914496, 327915520),
+      (331394816, 331395072),
+      (344006656, 344010752),
+      (369098752, 385875968),
+      (402653184, 419430400),
+      (425218048, 425222144),
+      (431624192, 431624448),
+      (432799744, 432865280),
+      (436207616, 452984832),
+      (469762048, 486539264),
+      (506462208, 507510784),
+      (526069760, 526070784),
+      (536870912, 603979776),
+      (620756992, 620822528),
+      (623853568, 623857664),
+      (632009472, 632009728),
+      (641363968, 641368064),
+      (663158784, 663224320),
+      (665231360, 665235456),
+      (671088640, 738197504),
+      (771751936, 788529152),
+    ],
+    [
+      12, 14, 22, 29, 32, 38, 40, 42, 44, 62, 79, 95, 260, 401, 456, 739, 2212, 6936,
+      10700, 13568, 14215, 21965, 31975, 34768, 86046, 149522, 169349, 217844, 222119,
+      227946, 520072, 582373, 775884, 1052929, 1532641, 1735928, 2199821, 2343087,
+      2734608, 3517363,
+    ],
+    "0/8 10 1/6 13 16 22 24 26 28 46 2/15 31 3/4 145 200 483 4/1188 5/2840 6604 9472 10119 6/5581 15591 18384 7/20510 83986 103813 152308 156583 162410 8/257928 320229 513740 9/4353 484065 687352 1151245 1294511 1686032 2468787",
+    "{\"0\":[8,10],\"1\":[6,13,16,22,24,26,28,46],\"2\":[15,31],\"3\":[4,145,200,483],\"4\":[1188],\"5\":[2840,6604,9472,10119],\"6\":[5581,15591,18384],\"7\":[20510,83986,103813,152308,156583,162410],\"8\":[257928,320229,513740],\"9\":[4353,484065,687352,1151245,1294511,1686032,2468787]}",
+  )
+}
+
+///|
+test "moc oracle JSON cells-37" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii(
+    "0/8 10 1/6 13 16 22 24 26 28 46 2/15 31 3/4 145 200 483 4/1188 5/2840 6604 9472 10119 6/5581 15591 18384 7/20510 83986 103813 152308 156583 162410 8/257928 320229 513740 9/4353 484065 687352 1151245 1294511 1686032 2468787",
+    limits,
+  )
+  let json = Moc::from_json(
+    "{\n  \"0\": [8, 10],\n  \"1\": [6, 13, 16, 22, 24, 26, 28, 46],\n  \"2\": [15, 31],\n  \"3\": [4, 145, 200, 483],\n  \"4\": [1188],\n  \"5\": [2840, 6604, 9472, 10119],\n  \"6\": [5581, 15591, 18384],\n  \"7\": [20510, 83986, 103813, 152308, 156583, 162410],\n  \"8\": [257928, 320229, 513740],\n  \"9\": [4353, 484065, 687352, 1151245, 1294511, 1686032, 2468787]\n}",
+    limits,
+  )
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle normalize cells-37" {
+  let limits = MocLimits::default()
+  let cells = [
+    Cell::new(Grid::from_level(1), 13),
+    Cell::new(Grid::from_level(3), 262),
+    Cell::new(Grid::from_level(8), 704902),
+    Cell::new(Grid::from_level(5), 6604),
+    Cell::new(Grid::from_level(7), 103813),
+    Cell::new(Grid::from_level(1), 26),
+    Cell::new(Grid::from_level(0), 8),
+    Cell::new(Grid::from_level(7), 152308),
+    Cell::new(Grid::from_level(9), 1294511),
+    Cell::new(Grid::from_level(7), 20510),
+    Cell::new(Grid::from_level(5), 9038),
+    Cell::new(Grid::from_level(2), 15),
+    Cell::new(Grid::from_level(9), 4353),
+    Cell::new(Grid::from_level(6), 42159),
+    Cell::new(Grid::from_level(1), 24),
+    Cell::new(Grid::from_level(9), 2468787),
+    Cell::new(Grid::from_level(8), 320229),
+    Cell::new(Grid::from_level(2), 113),
+    Cell::new(Grid::from_level(6), 15591),
+    Cell::new(Grid::from_level(1), 26),
+    Cell::new(Grid::from_level(1), 22),
+    Cell::new(Grid::from_level(9), 2300923),
+    Cell::new(Grid::from_level(5), 9472),
+    Cell::new(Grid::from_level(7), 156583),
+    Cell::new(Grid::from_level(8), 513740),
+    Cell::new(Grid::from_level(0), 10),
+    Cell::new(Grid::from_level(9), 1151245),
+    Cell::new(Grid::from_level(9), 1686032),
+    Cell::new(Grid::from_level(0), 10),
+    Cell::new(Grid::from_level(9), 484065),
+    Cell::new(Grid::from_level(7), 83986),
+    Cell::new(Grid::from_level(6), 18384),
+    Cell::new(Grid::from_level(1), 28),
+    Cell::new(Grid::from_level(3), 145),
+    Cell::new(Grid::from_level(2), 163),
+    Cell::new(Grid::from_level(2), 90),
+    Cell::new(Grid::from_level(1), 16),
+    Cell::new(Grid::from_level(8), 257928),
+    Cell::new(Grid::from_level(3), 4),
+    Cell::new(Grid::from_level(2), 96),
+    Cell::new(Grid::from_level(2), 31),
+    Cell::new(Grid::from_level(1), 46),
+    Cell::new(Grid::from_level(3), 483),
+    Cell::new(Grid::from_level(5), 10300),
+    Cell::new(Grid::from_level(7), 90330),
+    Cell::new(Grid::from_level(6), 5581),
+    Cell::new(Grid::from_level(3), 200),
+    Cell::new(Grid::from_level(7), 162410),
+    Cell::new(Grid::from_level(7), 164527),
+    Cell::new(Grid::from_level(1), 41),
+    Cell::new(Grid::from_level(5), 10119),
+    Cell::new(Grid::from_level(1), 6),
+    Cell::new(Grid::from_level(6), 29240),
+    Cell::new(Grid::from_level(5), 2840),
+    Cell::new(Grid::from_level(4), 1188),
+    Cell::new(Grid::from_level(9), 687352),
+  ]
+  let actual = Moc::from_cells(cells, 9, limits)
+  let expected = Moc::from_ascii(
+    "0/8 10 1/6 13 16 22 24 26 28 46 2/15 31 3/4 145 200 483 4/1188 5/2840 6604 9472 10119 6/5581 15591 18384 7/20510 83986 103813 152308 156583 162410 8/257928 320229 513740 9/4353 484065 687352 1151245 1294511 1686032 2468787",
+    limits,
+  )
+  assert_true(actual.equals(expected))
+  assert_eq(actual.max_order(), expected.max_order())
+}
+
+///|
+test "moc oracle cells-38" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii(
+    "0/0-1 3-4 6-8 10 1/39 2/44 189 3/160 370", limits,
+  )
+  moc_oracle_assert(
+    "cells-38",
+    actual,
+    3,
+    [
+      (0, 134217728),
+      (167772160, 168820736),
+      (184549376, 188743680),
+      (201326592, 335544320),
+      (387973120, 389021696),
+      (402653184, 603979776),
+      (654311424, 738197504),
+      (792723456, 796917760),
+    ],
+    [4, 5, 7, 8, 10, 11, 12, 14, 55, 108, 253, 416, 626],
+    "0/0-1 3-4 6-8 10 1/39 2/44 189 3/160 370",
+    "{\"0\":[0,1,3,4,6,7,8,10],\"1\":[39],\"2\":[44,189],\"3\":[160,370]}",
+  )
+}
+
+///|
+test "moc oracle JSON cells-38" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii(
+    "0/0-1 3-4 6-8 10 1/39 2/44 189 3/160 370", limits,
+  )
+  let json = Moc::from_json(
+    "{\n  \"0\": [0, 1, 3, 4, 6, 7, 8, 10],\n  \"1\": [39],\n  \"2\": [44, 189],\n  \"3\": [160, 370]\n}",
+    limits,
+  )
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle normalize cells-38" {
+  let limits = MocLimits::default()
+  let cells = [
+    Cell::new(Grid::from_level(3), 511),
+    Cell::new(Grid::from_level(2), 136),
+    Cell::new(Grid::from_level(0), 0),
+    Cell::new(Grid::from_level(3), 370),
+    Cell::new(Grid::from_level(0), 4),
+    Cell::new(Grid::from_level(1), 29),
+    Cell::new(Grid::from_level(0), 3),
+    Cell::new(Grid::from_level(3), 444),
+    Cell::new(Grid::from_level(0), 6),
+    Cell::new(Grid::from_level(1), 5),
+    Cell::new(Grid::from_level(2), 189),
+    Cell::new(Grid::from_level(0), 10),
+    Cell::new(Grid::from_level(3), 14),
+    Cell::new(Grid::from_level(0), 8),
+    Cell::new(Grid::from_level(0), 8),
+    Cell::new(Grid::from_level(2), 159),
+    Cell::new(Grid::from_level(2), 128),
+    Cell::new(Grid::from_level(1), 0),
+    Cell::new(Grid::from_level(0), 1),
+    Cell::new(Grid::from_level(2), 161),
+    Cell::new(Grid::from_level(0), 4),
+    Cell::new(Grid::from_level(3), 160),
+    Cell::new(Grid::from_level(0), 7),
+    Cell::new(Grid::from_level(1), 39),
+    Cell::new(Grid::from_level(3), 532),
+    Cell::new(Grid::from_level(0), 1),
+    Cell::new(Grid::from_level(1), 41),
+    Cell::new(Grid::from_level(1), 18),
+    Cell::new(Grid::from_level(0), 4),
+    Cell::new(Grid::from_level(3), 5),
+    Cell::new(Grid::from_level(3), 528),
+    Cell::new(Grid::from_level(2), 19),
+    Cell::new(Grid::from_level(0), 6),
+    Cell::new(Grid::from_level(1), 14),
+    Cell::new(Grid::from_level(2), 44),
+    Cell::new(Grid::from_level(3), 410),
+  ]
+  let actual = Moc::from_cells(cells, 3, limits)
+  let expected = Moc::from_ascii(
+    "0/0-1 3-4 6-8 10 1/39 2/44 189 3/160 370", limits,
+  )
+  assert_true(actual.equals(expected))
+  assert_eq(actual.max_order(), expected.max_order())
+}
+
+///|
+test "moc oracle cells-39" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii(
+    "0/0 3/190 691 5/3424 6/5386 18461 7/34509 152732 8/123402 718444 9/2263937 11/",
+    limits,
+  )
+  moc_oracle_assert(
+    "cells-39",
+    actual,
+    11,
+    [
+      (0, 67108864),
+      (88244224, 88260608),
+      (126363648, 126364672),
+      (141348864, 141352960),
+      (199229440, 200278016),
+      (224395264, 224460800),
+      (302465024, 302481408),
+      (579567872, 579568128),
+      (625590272, 625594368),
+      (724566016, 725614592),
+      (735686656, 735687680),
+    ],
+    [4, 446, 947, 7520, 21770, 34845, 100045, 218268, 385546, 980588, 3312513],
+    "0/0 3/190 691 5/3424 6/5386 18461 7/34509 152732 8/123402 718444 9/2263937 11/",
+    "{\"0\":[0],\"3\":[190,691],\"5\":[3424],\"6\":[5386,18461],\"7\":[34509,152732],\"8\":[123402,718444],\"9\":[2263937],\"11\":[]}",
+  )
+}
+
+///|
+test "moc oracle JSON cells-39" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii(
+    "0/0 3/190 691 5/3424 6/5386 18461 7/34509 152732 8/123402 718444 9/2263937 11/",
+    limits,
+  )
+  let json = Moc::from_json(
+    "{\n  \"0\": [0],\n  \"3\": [190, 691],\n  \"5\": [3424],\n  \"6\": [5386, 18461],\n  \"7\": [34509, 152732],\n  \"8\": [123402, 718444],\n  \"9\": [2263937],\n  \"11\": []\n}",
+    limits,
+  )
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle normalize cells-39" {
+  let limits = MocLimits::default()
+  let cells = [
+    Cell::new(Grid::from_level(8), 123402),
+    Cell::new(Grid::from_level(3), 190),
+    Cell::new(Grid::from_level(9), 2263937),
+    Cell::new(Grid::from_level(6), 18461),
+    Cell::new(Grid::from_level(6), 5386),
+    Cell::new(Grid::from_level(7), 34509),
+    Cell::new(Grid::from_level(8), 718444),
+    Cell::new(Grid::from_level(0), 0),
+    Cell::new(Grid::from_level(5), 3424),
+    Cell::new(Grid::from_level(3), 691),
+    Cell::new(Grid::from_level(7), 152732),
+  ]
+  let actual = Moc::from_cells(cells, 11, limits)
+  let expected = Moc::from_ascii(
+    "0/0 3/190 691 5/3424 6/5386 18461 7/34509 152732 8/123402 718444 9/2263937 11/",
+    limits,
+  )
+  assert_true(actual.equals(expected))
+  assert_eq(actual.max_order(), expected.max_order())
+}
+
+///|
+test "moc oracle cells-40" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii(
+    "0/4-5 8 1/1 7 12 14 46 2/148 153 3/412 4/1917 1975 2623 2741 2868 5/3475 9688 6/5660 13906 25707 26626 28323 7/3026 182696 8/261743 9/202349 10/7226588 11/897616 5870250 9819138 10210023 11775871 42381056 47391420 12/12265473 35550877 36593576 106598329 13/94803689",
+    limits,
+  )
+  moc_oracle_assert(
+    "cells-40",
+    actual,
+    13,
+    [
+      (12394496, 12398592),
+      (14361856, 14361872),
+      (16777216, 33554432),
+      (49061892, 49061896),
+      (51801344, 51801600),
+      (92733440, 92749824),
+      (93924000, 93924016),
+      (94803689, 94803690),
+      (117440512, 134217728),
+      (142203508, 142203512),
+      (146374304, 146374308),
+      (157106208, 157106224),
+      (163360368, 163360384),
+      (188413936, 188413952),
+      (201326592, 218103808),
+      (227737600, 227803136),
+      (227835904, 227852288),
+      (234881024, 251658240),
+      (268024832, 268025856),
+      (268435456, 402653184),
+      (421183488, 421199872),
+      (426393316, 426393320),
+      (432013312, 433061888),
+      (436240384, 436256768),
+      (462501632, 462501696),
+      (464044032, 464060416),
+      (502530048, 502792192),
+      (517734400, 517996544),
+      (536870912, 603979776),
+      (620756992, 624951296),
+      (634912768, 634978304),
+      (641728512, 645922816),
+      (678096896, 678096912),
+      (687603712, 687865856),
+      (718536704, 718798848),
+      (748322816, 748326912),
+      (751828992, 752091136),
+      (758262720, 758262736),
+      (771751936, 788529152),
+    ],
+    [
+      8, 9, 12, 17, 23, 28, 30, 62, 212, 217, 668, 2941, 2999, 3647, 3765, 3892,
+      7571, 13784, 22044, 30290, 42091, 43010, 44707, 68562, 248232, 523887, 1250925,
+      11420892, 17674832, 22647466, 26596354, 26987239, 28553087, 59158272, 64168636,
+      79374337, 102659741, 103702440, 173707193, 363239145,
+    ],
+    "0/4-5 8 1/1 7 12 14 46 2/148 153 3/412 4/1917 1975 2623 2741 2868 5/3475 9688 6/5660 13906 25707 26626 28323 7/3026 182696 8/261743 9/202349 10/7226588 11/897616 5870250 9819138 10210023 11775871 42381056 47391420 12/12265473 35550877 36593576 106598329 13/94803689",
+    "{\"0\":[4,5,8],\"1\":[1,7,12,14,46],\"2\":[148,153],\"3\":[412],\"4\":[1917,1975,2623,2741,2868],\"5\":[3475,9688],\"6\":[5660,13906,25707,26626,28323],\"7\":[3026,182696],\"8\":[261743],\"9\":[202349],\"10\":[7226588],\"11\":[897616,5870250,9819138,10210023,11775871,42381056,47391420],\"12\":[12265473,35550877,36593576,106598329],\"13\":[94803689]}",
+  )
+}
+
+///|
+test "moc oracle JSON cells-40" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii(
+    "0/4-5 8 1/1 7 12 14 46 2/148 153 3/412 4/1917 1975 2623 2741 2868 5/3475 9688 6/5660 13906 25707 26626 28323 7/3026 182696 8/261743 9/202349 10/7226588 11/897616 5870250 9819138 10210023 11775871 42381056 47391420 12/12265473 35550877 36593576 106598329 13/94803689",
+    limits,
+  )
+  let json = Moc::from_json(
+    "{\n  \"0\": [4, 5, 8],\n  \"1\": [1, 7, 12, 14, 46],\n  \"2\": [148, 153],\n  \"3\": [412],\n  \"4\": [1917, 1975, 2623, 2741, 2868],\n  \"5\": [3475, 9688],\n  \"6\": [5660, 13906, 25707, 26626, 28323],\n  \"7\": [3026, 182696],\n  \"8\": [261743],\n  \"9\": [202349],\n  \"10\": [7226588],\n  \"11\": [897616, 5870250, 9819138, 10210023, 11775871, 42381056, 47391420],\n  \"12\": [12265473, 35550877, 36593576, 106598329],\n  \"13\": [94803689]\n}",
+    limits,
+  )
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle normalize cells-40" {
+  let limits = MocLimits::default()
+  let cells = [
+    Cell::new(Grid::from_level(4), 1917),
+    Cell::new(Grid::from_level(11), 20107740),
+    Cell::new(Grid::from_level(6), 7798),
+    Cell::new(Grid::from_level(6), 15034),
+    Cell::new(Grid::from_level(11), 11775871),
+    Cell::new(Grid::from_level(4), 2623),
+    Cell::new(Grid::from_level(6), 5660),
+    Cell::new(Grid::from_level(11), 10210023),
+    Cell::new(Grid::from_level(1), 14),
+    Cell::new(Grid::from_level(5), 3475),
+    Cell::new(Grid::from_level(6), 23109),
+    Cell::new(Grid::from_level(4), 1482),
+    Cell::new(Grid::from_level(2), 48),
+    Cell::new(Grid::from_level(3), 412),
+    Cell::new(Grid::from_level(4), 88),
+    Cell::new(Grid::from_level(7), 93783),
+    Cell::new(Grid::from_level(11), 5870250),
+    Cell::new(Grid::from_level(6), 25707),
+    Cell::new(Grid::from_level(12), 12265473),
+    Cell::new(Grid::from_level(1), 17),
+    Cell::new(Grid::from_level(2), 148),
+    Cell::new(Grid::from_level(1), 12),
+    Cell::new(Grid::from_level(12), 106598329),
+    Cell::new(Grid::from_level(7), 133711),
+    Cell::new(Grid::from_level(8), 365442),
+    Cell::new(Grid::from_level(11), 9819138),
+    Cell::new(Grid::from_level(13), 206406824),
+    Cell::new(Grid::from_level(1), 46),
+    Cell::new(Grid::from_level(4), 2868),
+    Cell::new(Grid::from_level(0), 5),
+    Cell::new(Grid::from_level(11), 42381056),
+    Cell::new(Grid::from_level(12), 59272829),
+    Cell::new(Grid::from_level(4), 2741),
+    Cell::new(Grid::from_level(11), 47391420),
+    Cell::new(Grid::from_level(7), 73381),
+    Cell::new(Grid::from_level(12), 35550877),
+    Cell::new(Grid::from_level(8), 261743),
+    Cell::new(Grid::from_level(11), 897616),
+    Cell::new(Grid::from_level(5), 9688),
+    Cell::new(Grid::from_level(7), 146749),
+    Cell::new(Grid::from_level(6), 28323),
+    Cell::new(Grid::from_level(7), 3026),
+    Cell::new(Grid::from_level(6), 21650),
+    Cell::new(Grid::from_level(7), 80453),
+    Cell::new(Grid::from_level(12), 36593576),
+    Cell::new(Grid::from_level(6), 13906),
+    Cell::new(Grid::from_level(5), 8333),
+    Cell::new(Grid::from_level(2), 4),
+    Cell::new(Grid::from_level(7), 182696),
+    Cell::new(Grid::from_level(0), 8),
+    Cell::new(Grid::from_level(13), 94803689),
+    Cell::new(Grid::from_level(4), 1975),
+    Cell::new(Grid::from_level(0), 4),
+    Cell::new(Grid::from_level(6), 26626),
+    Cell::new(Grid::from_level(10), 7226588),
+    Cell::new(Grid::from_level(1), 1),
+    Cell::new(Grid::from_level(1), 7),
+    Cell::new(Grid::from_level(3), 115),
+    Cell::new(Grid::from_level(11), 22732482),
+    Cell::new(Grid::from_level(2), 153),
+    Cell::new(Grid::from_level(9), 202349),
+    Cell::new(Grid::from_level(2), 91),
+  ]
+  let actual = Moc::from_cells(cells, 13, limits)
+  let expected = Moc::from_ascii(
+    "0/4-5 8 1/1 7 12 14 46 2/148 153 3/412 4/1917 1975 2623 2741 2868 5/3475 9688 6/5660 13906 25707 26626 28323 7/3026 182696 8/261743 9/202349 10/7226588 11/897616 5870250 9819138 10210023 11775871 42381056 47391420 12/12265473 35550877 36593576 106598329 13/94803689",
+    limits,
+  )
+  assert_true(actual.equals(expected))
+  assert_eq(actual.max_order(), expected.max_order())
+}
+
+///|
+test "moc oracle cells-41" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii(
+    "0/3 5 1/26 37 42 2/97 146 153 164 173 3/88 107 135 469 4/285 758 2018 2539 5/11071 6/3449 25477 30301 7/75475 102589 8/10842 552721 9/2301125 10/1337066",
+    limits,
+  )
+  moc_oracle_assert(
+    "cells-41",
+    actual,
+    10,
+    [
+      (11102208, 11103232),
+      (56508416, 56524800),
+      (74711040, 74973184),
+      (85572224, 85572288),
+      (92274688, 93323264),
+      (112197632, 113246208),
+      (141557760, 142606336),
+      (198705152, 198967296),
+      (201326592, 268435456),
+      (309145600, 309149696),
+      (335544320, 402653184),
+      (406847488, 411041792),
+      (417415168, 417431552),
+      (420204544, 420208640),
+      (436207616, 452984832),
+      (491782144, 492830720),
+      (496451584, 496467968),
+      (529006592, 529268736),
+      (565986304, 565987328),
+      (589088000, 589088256),
+      (612368384, 616562688),
+      (620756992, 637534208),
+      (641728512, 645922816),
+      (665583616, 665845760),
+      (687865856, 692060160),
+      (704643072, 721420288),
+      (725549056, 729808896),
+    ],
+    [
+      7, 9, 42, 53, 58, 161, 210, 217, 228, 237, 344, 363, 391, 725, 1309, 1782,
+      3042, 3563, 15167, 19833, 41861, 46685, 141011, 168125, 272986, 814865, 3349701,
+      5531370,
+    ],
+    "0/3 5 1/26 37 42 2/97 146 153 164 173 3/88 107 135 469 4/285 758 2018 2539 5/11071 6/3449 25477 30301 7/75475 102589 8/10842 552721 9/2301125 10/1337066",
+    "{\"0\":[3,5],\"1\":[26,37,42],\"2\":[97,146,153,164,173],\"3\":[88,107,135,469],\"4\":[285,758,2018,2539],\"5\":[11071],\"6\":[3449,25477,30301],\"7\":[75475,102589],\"8\":[10842,552721],\"9\":[2301125],\"10\":[1337066]}",
+  )
+}
+
+///|
+test "moc oracle JSON cells-41" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii(
+    "0/3 5 1/26 37 42 2/97 146 153 164 173 3/88 107 135 469 4/285 758 2018 2539 5/11071 6/3449 25477 30301 7/75475 102589 8/10842 552721 9/2301125 10/1337066",
+    limits,
+  )
+  let json = Moc::from_json(
+    "{\n  \"0\": [3, 5],\n  \"1\": [26, 37, 42],\n  \"2\": [97, 146, 153, 164, 173],\n  \"3\": [88, 107, 135, 469],\n  \"4\": [285, 758, 2018, 2539],\n  \"5\": [11071],\n  \"6\": [3449, 25477, 30301],\n  \"7\": [75475, 102589],\n  \"8\": [10842, 552721],\n  \"9\": [2301125],\n  \"10\": [1337066]\n}",
+    limits,
+  )
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle normalize cells-41" {
+  let limits = MocLimits::default()
+  let cells = [
+    Cell::new(Grid::from_level(6), 25477),
+    Cell::new(Grid::from_level(8), 10842),
+    Cell::new(Grid::from_level(7), 172786),
+    Cell::new(Grid::from_level(8), 552721),
+    Cell::new(Grid::from_level(1), 26),
+    Cell::new(Grid::from_level(4), 1453),
+    Cell::new(Grid::from_level(4), 2539),
+    Cell::new(Grid::from_level(1), 21),
+    Cell::new(Grid::from_level(4), 2018),
+    Cell::new(Grid::from_level(2), 153),
+    Cell::new(Grid::from_level(9), 2778515),
+    Cell::new(Grid::from_level(4), 285),
+    Cell::new(Grid::from_level(9), 930041),
+    Cell::new(Grid::from_level(5), 11071),
+    Cell::new(Grid::from_level(3), 107),
+    Cell::new(Grid::from_level(7), 102589),
+    Cell::new(Grid::from_level(10), 1337066),
+    Cell::new(Grid::from_level(6), 3449),
+    Cell::new(Grid::from_level(0), 3),
+    Cell::new(Grid::from_level(3), 469),
+    Cell::new(Grid::from_level(6), 30301),
+    Cell::new(Grid::from_level(0), 5),
+    Cell::new(Grid::from_level(2), 146),
+    Cell::new(Grid::from_level(2), 173),
+    Cell::new(Grid::from_level(7), 75475),
+    Cell::new(Grid::from_level(9), 2301125),
+    Cell::new(Grid::from_level(3), 135),
+    Cell::new(Grid::from_level(4), 758),
+    Cell::new(Grid::from_level(3), 88),
+    Cell::new(Grid::from_level(4), 2462),
+    Cell::new(Grid::from_level(2), 164),
+    Cell::new(Grid::from_level(3), 357),
+    Cell::new(Grid::from_level(2), 61),
+    Cell::new(Grid::from_level(1), 37),
+    Cell::new(Grid::from_level(1), 42),
+    Cell::new(Grid::from_level(2), 97),
+  ]
+  let actual = Moc::from_cells(cells, 10, limits)
+  let expected = Moc::from_ascii(
+    "0/3 5 1/26 37 42 2/97 146 153 164 173 3/88 107 135 469 4/285 758 2018 2539 5/11071 6/3449 25477 30301 7/75475 102589 8/10842 552721 9/2301125 10/1337066",
+    limits,
+  )
+  assert_true(actual.equals(expected))
+  assert_eq(actual.max_order(), expected.max_order())
+}
+
+///|
+test "moc oracle cells-42" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii("0/3 9-10 2/46 123 133 186 3/40", limits)
+  moc_oracle_assert(
+    "cells-42",
+    actual,
+    3,
+    [
+      (41943040, 42991616),
+      (192937984, 197132288),
+      (201326592, 268435456),
+      (515899392, 520093696),
+      (557842432, 562036736),
+      (603979776, 738197504),
+      (780140544, 784334848),
+    ],
+    [7, 13, 14, 110, 187, 197, 250, 296],
+    "0/3 9-10 2/46 123 133 186 3/40",
+    "{\"0\":[3,9,10],\"2\":[46,123,133,186],\"3\":[40]}",
+  )
+}
+
+///|
+test "moc oracle JSON cells-42" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii("0/3 9-10 2/46 123 133 186 3/40", limits)
+  let json = Moc::from_json(
+    "{\n  \"0\": [3, 9, 10],\n  \"2\": [46, 123, 133, 186],\n  \"3\": [40]\n}", limits,
+  )
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle normalize cells-42" {
+  let limits = MocLimits::default()
+  let cells = [
+    Cell::new(Grid::from_level(2), 123),
+    Cell::new(Grid::from_level(0), 3),
+    Cell::new(Grid::from_level(0), 9),
+    Cell::new(Grid::from_level(3), 40),
+    Cell::new(Grid::from_level(2), 46),
+    Cell::new(Grid::from_level(0), 10),
+    Cell::new(Grid::from_level(1), 41),
+    Cell::new(Grid::from_level(2), 133),
+    Cell::new(Grid::from_level(2), 186),
+  ]
+  let actual = Moc::from_cells(cells, 3, limits)
+  let expected = Moc::from_ascii("0/3 9-10 2/46 123 133 186 3/40", limits)
+  assert_true(actual.equals(expected))
+  assert_eq(actual.max_order(), expected.max_order())
+}
+
+///|
+test "moc oracle cells-43" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii(
+    "0/1 3-4 8 1/0 29 40 2/113 120 168 3/422 4/540 2029 2426 5/265 630 2671 6340 8103 11460",
+    limits,
+  )
+  moc_oracle_assert(
+    "cells-43",
+    actual,
+    5,
+    [
+      (0, 16777216),
+      (17367040, 17432576),
+      (41287680, 41353216),
+      (67108864, 134217728),
+      (141557760, 141819904),
+      (175046656, 175112192),
+      (201326592, 335544320),
+      (415498240, 415563776),
+      (442499072, 443547648),
+      (473956352, 478150656),
+      (486539264, 507510784),
+      (531038208, 531103744),
+      (531890176, 532152320),
+      (536870912, 603979776),
+      (635961344, 636223488),
+      (671088640, 687865856),
+      (704643072, 708837376),
+      (751042560, 751108096),
+    ],
+    [
+      5, 7, 8, 12, 16, 45, 56, 177, 184, 232, 678, 1564, 3053, 3450, 4361, 4726,
+      6767, 10436, 12199, 15556,
+    ],
+    "0/1 3-4 8 1/0 29 40 2/113 120 168 3/422 4/540 2029 2426 5/265 630 2671 6340 8103 11460",
+    "{\"0\":[1,3,4,8],\"1\":[0,29,40],\"2\":[113,120,168],\"3\":[422],\"4\":[540,2029,2426],\"5\":[265,630,2671,6340,8103,11460]}",
+  )
+}
+
+///|
+test "moc oracle JSON cells-43" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii(
+    "0/1 3-4 8 1/0 29 40 2/113 120 168 3/422 4/540 2029 2426 5/265 630 2671 6340 8103 11460",
+    limits,
+  )
+  let json = Moc::from_json(
+    "{\n  \"0\": [1, 3, 4, 8],\n  \"1\": [0, 29, 40],\n  \"2\": [113, 120, 168],\n  \"3\": [422],\n  \"4\": [540, 2029, 2426],\n  \"5\": [265, 630, 2671, 6340, 8103, 11460]\n}",
+    limits,
+  )
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle normalize cells-43" {
+  let limits = MocLimits::default()
+  let cells = [
+    Cell::new(Grid::from_level(3), 473),
+    Cell::new(Grid::from_level(2), 113),
+    Cell::new(Grid::from_level(2), 168),
+    Cell::new(Grid::from_level(5), 6340),
+    Cell::new(Grid::from_level(0), 3),
+    Cell::new(Grid::from_level(1), 40),
+    Cell::new(Grid::from_level(5), 8103),
+    Cell::new(Grid::from_level(1), 7),
+    Cell::new(Grid::from_level(5), 630),
+    Cell::new(Grid::from_level(0), 4),
+    Cell::new(Grid::from_level(1), 0),
+    Cell::new(Grid::from_level(3), 422),
+    Cell::new(Grid::from_level(4), 2055),
+    Cell::new(Grid::from_level(3), 532),
+    Cell::new(Grid::from_level(0), 8),
+    Cell::new(Grid::from_level(2), 120),
+    Cell::new(Grid::from_level(5), 11460),
+    Cell::new(Grid::from_level(4), 2029),
+    Cell::new(Grid::from_level(3), 648),
+    Cell::new(Grid::from_level(0), 1),
+    Cell::new(Grid::from_level(2), 71),
+    Cell::new(Grid::from_level(5), 265),
+    Cell::new(Grid::from_level(1), 29),
+    Cell::new(Grid::from_level(4), 2426),
+    Cell::new(Grid::from_level(5), 8245),
+    Cell::new(Grid::from_level(5), 3106),
+    Cell::new(Grid::from_level(4), 540),
+    Cell::new(Grid::from_level(1), 17),
+    Cell::new(Grid::from_level(3), 108),
+    Cell::new(Grid::from_level(5), 2671),
+  ]
+  let actual = Moc::from_cells(cells, 5, limits)
+  let expected = Moc::from_ascii(
+    "0/1 3-4 8 1/0 29 40 2/113 120 168 3/422 4/540 2029 2426 5/265 630 2671 6340 8103 11460",
+    limits,
+  )
+  assert_true(actual.equals(expected))
+  assert_eq(actual.max_order(), expected.max_order())
+}
+
+///|
+test "moc oracle cells-44" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii(
+    "0/0 3-5 9-10 1/26 31 2/40 3/102 489 573 4/452 564 5/2069 6/11476 7/29649 39304 8/478416 9/2291177 10/1714206 2501133 11/4257418",
+    limits,
+  )
+  moc_oracle_assert(
+    "cells-44",
+    actual,
+    11,
+    [
+      (0, 67108864),
+      (68118688, 68118704),
+      (106954752, 108003328),
+      (109709184, 109709248),
+      (118489088, 118751232),
+      (121442304, 121446400),
+      (135593984, 135659520),
+      (147849216, 148111360),
+      (160072512, 160072576),
+      (160989184, 160993280),
+      (167772160, 171966464),
+      (188022784, 188039168),
+      (201326592, 402653184),
+      (436207616, 452984832),
+      (489897984, 489899008),
+      (512753664, 513802240),
+      (520093696, 536870912),
+      (586541312, 586541568),
+      (600834048, 601882624),
+      (603979776, 738197504),
+    ],
+    [
+      4, 7, 8, 9, 13, 14, 42, 47, 104, 358, 745, 829, 1476, 1588, 6165, 27860, 95185,
+      104840, 740560, 3339753, 5908510, 6695437, 21034634,
+    ],
+    "0/0 3-5 9-10 1/26 31 2/40 3/102 489 573 4/452 564 5/2069 6/11476 7/29649 39304 8/478416 9/2291177 10/1714206 2501133 11/4257418",
+    "{\"0\":[0,3,4,5,9,10],\"1\":[26,31],\"2\":[40],\"3\":[102,489,573],\"4\":[452,564],\"5\":[2069],\"6\":[11476],\"7\":[29649,39304],\"8\":[478416],\"9\":[2291177],\"10\":[1714206,2501133],\"11\":[4257418]}",
+  )
+}
+
+///|
+test "moc oracle JSON cells-44" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii(
+    "0/0 3-5 9-10 1/26 31 2/40 3/102 489 573 4/452 564 5/2069 6/11476 7/29649 39304 8/478416 9/2291177 10/1714206 2501133 11/4257418",
+    limits,
+  )
+  let json = Moc::from_json(
+    "{\n  \"0\": [0, 3, 4, 5, 9, 10],\n  \"1\": [26, 31],\n  \"2\": [40],\n  \"3\": [102, 489, 573],\n  \"4\": [452, 564],\n  \"5\": [2069],\n  \"6\": [11476],\n  \"7\": [29649, 39304],\n  \"8\": [478416],\n  \"9\": [2291177],\n  \"10\": [1714206, 2501133],\n  \"11\": [4257418]\n}",
+    limits,
+  )
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle normalize cells-44" {
+  let limits = MocLimits::default()
+  let cells = [
+    Cell::new(Grid::from_level(0), 10),
+    Cell::new(Grid::from_level(0), 4),
+    Cell::new(Grid::from_level(3), 102),
+    Cell::new(Grid::from_level(4), 2643),
+    Cell::new(Grid::from_level(8), 198619),
+    Cell::new(Grid::from_level(0), 5),
+    Cell::new(Grid::from_level(9), 1459197),
+    Cell::new(Grid::from_level(6), 23937),
+    Cell::new(Grid::from_level(5), 11036),
+    Cell::new(Grid::from_level(9), 2291177),
+    Cell::new(Grid::from_level(10), 1714206),
+    Cell::new(Grid::from_level(9), 99544),
+    Cell::new(Grid::from_level(0), 0),
+    Cell::new(Grid::from_level(0), 3),
+    Cell::new(Grid::from_level(7), 154070),
+    Cell::new(Grid::from_level(10), 6164976),
+    Cell::new(Grid::from_level(7), 41058),
+    Cell::new(Grid::from_level(3), 489),
+    Cell::new(Grid::from_level(10), 11095175),
+    Cell::new(Grid::from_level(3), 573),
+    Cell::new(Grid::from_level(11), 20662408),
+    Cell::new(Grid::from_level(2), 40),
+    Cell::new(Grid::from_level(8), 478416),
+    Cell::new(Grid::from_level(6), 19218),
+    Cell::new(Grid::from_level(5), 2069),
+    Cell::new(Grid::from_level(0), 4),
+    Cell::new(Grid::from_level(10), 2501133),
+    Cell::new(Grid::from_level(1), 31),
+    Cell::new(Grid::from_level(0), 9),
+    Cell::new(Grid::from_level(6), 37277),
+    Cell::new(Grid::from_level(0), 4),
+    Cell::new(Grid::from_level(8), 342497),
+    Cell::new(Grid::from_level(1), 40),
+    Cell::new(Grid::from_level(0), 4),
+    Cell::new(Grid::from_level(1), 26),
+    Cell::new(Grid::from_level(1), 13),
+    Cell::new(Grid::from_level(0), 10),
+    Cell::new(Grid::from_level(10), 5013777),
+    Cell::new(Grid::from_level(11), 24558106),
+    Cell::new(Grid::from_level(6), 44237),
+    Cell::new(Grid::from_level(5), 9754),
+    Cell::new(Grid::from_level(4), 452),
+    Cell::new(Grid::from_level(0), 10),
+    Cell::new(Grid::from_level(1), 40),
+    Cell::new(Grid::from_level(7), 29649),
+    Cell::new(Grid::from_level(6), 11476),
+    Cell::new(Grid::from_level(8), 200706),
+    Cell::new(Grid::from_level(10), 934099),
+    Cell::new(Grid::from_level(7), 39304),
+    Cell::new(Grid::from_level(10), 366246),
+    Cell::new(Grid::from_level(9), 907879),
+    Cell::new(Grid::from_level(7), 89202),
+    Cell::new(Grid::from_level(11), 4257418),
+    Cell::new(Grid::from_level(4), 564),
+    Cell::new(Grid::from_level(4), 962),
+  ]
+  let actual = Moc::from_cells(cells, 11, limits)
+  let expected = Moc::from_ascii(
+    "0/0 3-5 9-10 1/26 31 2/40 3/102 489 573 4/452 564 5/2069 6/11476 7/29649 39304 8/478416 9/2291177 10/1714206 2501133 11/4257418",
+    limits,
+  )
+  assert_true(actual.equals(expected))
+  assert_eq(actual.max_order(), expected.max_order())
+}
+
+///|
+test "moc oracle cells-45" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii(
+    "0/3 6 10 1/36 2/85 90 133 3/134 149 4/317 5/2481 9740 6/29636 29651 40629 7/4694 25855 89826 142347 8/138617 333626 353837 378447 647933 9/493866 784085 11/16947598 31523934 40737983",
+    limits,
+  )
+  moc_oracle_assert(
+    "cells-45",
+    actual,
+    11,
+    [
+      (19226624, 19230720),
+      (83099648, 83361792),
+      (105902080, 105906176),
+      (126429696, 126429952),
+      (140509184, 141557760),
+      (141943808, 141944832),
+      (156237824, 157286400),
+      (162594816, 162660352),
+      (200725760, 200726016),
+      (201326592, 268435456),
+      (271161568, 271161584),
+      (341633024, 341634048),
+      (356515840, 360710144),
+      (362329088, 362330112),
+      (367927296, 367931392),
+      (377487360, 381681664),
+      (387529728, 387530752),
+      (402653184, 469762048),
+      (485556224, 485572608),
+      (485801984, 485818368),
+      (504382944, 504382960),
+      (557842432, 562036736),
+      (583053312, 583057408),
+      (603979776, 620756992),
+      (638320640, 638386176),
+      (651807728, 651807744),
+      (663483392, 663484416),
+      (665665536, 665681920),
+      (671088640, 738197504),
+    ],
+    [
+      7, 10, 14, 52, 149, 154, 197, 390, 405, 1341, 6577, 13836, 46020, 46035, 57013,
+      70230, 91391, 155362, 207883, 400761, 595770, 615981, 640591, 910077, 1542442,
+      1832661, 33724814, 48301150, 57515199,
+    ],
+    "0/3 6 10 1/36 2/85 90 133 3/134 149 4/317 5/2481 9740 6/29636 29651 40629 7/4694 25855 89826 142347 8/138617 333626 353837 378447 647933 9/493866 784085 11/16947598 31523934 40737983",
+    "{\"0\":[3,6,10],\"1\":[36],\"2\":[85,90,133],\"3\":[134,149],\"4\":[317],\"5\":[2481,9740],\"6\":[29636,29651,40629],\"7\":[4694,25855,89826,142347],\"8\":[138617,333626,353837,378447,647933],\"9\":[493866,784085],\"11\":[16947598,31523934,40737983]}",
+  )
+}
+
+///|
+test "moc oracle JSON cells-45" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii(
+    "0/3 6 10 1/36 2/85 90 133 3/134 149 4/317 5/2481 9740 6/29636 29651 40629 7/4694 25855 89826 142347 8/138617 333626 353837 378447 647933 9/493866 784085 11/16947598 31523934 40737983",
+    limits,
+  )
+  let json = Moc::from_json(
+    "{\n  \"0\": [3, 6, 10],\n  \"1\": [36],\n  \"2\": [85, 90, 133],\n  \"3\": [134, 149],\n  \"4\": [317],\n  \"5\": [2481, 9740],\n  \"6\": [29636, 29651, 40629],\n  \"7\": [4694, 25855, 89826, 142347],\n  \"8\": [138617, 333626, 353837, 378447, 647933],\n  \"9\": [493866, 784085],\n  \"11\": [16947598, 31523934, 40737983]\n}",
+    limits,
+  )
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle normalize cells-45" {
+  let limits = MocLimits::default()
+  let cells = [
+    Cell::new(Grid::from_level(5), 2481),
+    Cell::new(Grid::from_level(6), 41757),
+    Cell::new(Grid::from_level(5), 10833),
+    Cell::new(Grid::from_level(3), 676),
+    Cell::new(Grid::from_level(9), 784085),
+    Cell::new(Grid::from_level(11), 13290842),
+    Cell::new(Grid::from_level(7), 142347),
+    Cell::new(Grid::from_level(8), 138617),
+    Cell::new(Grid::from_level(1), 36),
+    Cell::new(Grid::from_level(9), 493866),
+    Cell::new(Grid::from_level(9), 1810334),
+    Cell::new(Grid::from_level(8), 353837),
+    Cell::new(Grid::from_level(0), 6),
+    Cell::new(Grid::from_level(3), 149),
+    Cell::new(Grid::from_level(8), 378447),
+    Cell::new(Grid::from_level(6), 40629),
+    Cell::new(Grid::from_level(7), 25855),
+    Cell::new(Grid::from_level(5), 11185),
+    Cell::new(Grid::from_level(3), 684),
+    Cell::new(Grid::from_level(3), 678),
+    Cell::new(Grid::from_level(11), 27127494),
+    Cell::new(Grid::from_level(4), 317),
+    Cell::new(Grid::from_level(8), 647933),
+    Cell::new(Grid::from_level(5), 9740),
+    Cell::new(Grid::from_level(11), 16347653),
+    Cell::new(Grid::from_level(3), 412),
+    Cell::new(Grid::from_level(7), 89826),
+    Cell::new(Grid::from_level(2), 133),
+    Cell::new(Grid::from_level(3), 134),
+    Cell::new(Grid::from_level(6), 29636),
+    Cell::new(Grid::from_level(7), 168934),
+    Cell::new(Grid::from_level(11), 16947598),
+    Cell::new(Grid::from_level(0), 3),
+    Cell::new(Grid::from_level(2), 90),
+    Cell::new(Grid::from_level(4), 2609),
+    Cell::new(Grid::from_level(11), 31523934),
+    Cell::new(Grid::from_level(7), 4694),
+    Cell::new(Grid::from_level(2), 85),
+    Cell::new(Grid::from_level(0), 10),
+    Cell::new(Grid::from_level(11), 40737983),
+    Cell::new(Grid::from_level(6), 29651),
+    Cell::new(Grid::from_level(5), 3166),
+    Cell::new(Grid::from_level(8), 333626),
+    Cell::new(Grid::from_level(11), 28525077),
+    Cell::new(Grid::from_level(10), 11273421),
+  ]
+  let actual = Moc::from_cells(cells, 11, limits)
+  let expected = Moc::from_ascii(
+    "0/3 6 10 1/36 2/85 90 133 3/134 149 4/317 5/2481 9740 6/29636 29651 40629 7/4694 25855 89826 142347 8/138617 333626 353837 378447 647933 9/493866 784085 11/16947598 31523934 40737983",
+    limits,
+  )
+  assert_true(actual.equals(expected))
+  assert_eq(actual.max_order(), expected.max_order())
+}
+
+///|
+test "moc oracle cells-46" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii("0/5-7 11 1/11 2/150", limits)
+  moc_oracle_assert(
+    "cells-46",
+    actual,
+    2,
+    [
+      (184549376, 201326592),
+      (335544320, 536870912),
+      (629145600, 633339904),
+      (738197504, 805306368),
+    ],
+    [9, 10, 11, 15, 27, 214],
+    "0/5-7 11 1/11 2/150",
+    "{\"0\":[5,6,7,11],\"1\":[11],\"2\":[150]}",
+  )
+}
+
+///|
+test "moc oracle JSON cells-46" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii("0/5-7 11 1/11 2/150", limits)
+  let json = Moc::from_json(
+    "{\n  \"0\": [5, 6, 7, 11],\n  \"1\": [11],\n  \"2\": [150]\n}", limits,
+  )
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle normalize cells-46" {
+  let limits = MocLimits::default()
+  let cells = [
+    Cell::new(Grid::from_level(0), 7),
+    Cell::new(Grid::from_level(2), 150),
+    Cell::new(Grid::from_level(0), 5),
+    Cell::new(Grid::from_level(0), 6),
+    Cell::new(Grid::from_level(0), 7),
+    Cell::new(Grid::from_level(1), 11),
+    Cell::new(Grid::from_level(0), 11),
+    Cell::new(Grid::from_level(0), 6),
+    Cell::new(Grid::from_level(2), 95),
+    Cell::new(Grid::from_level(2), 98),
+  ]
+  let actual = Moc::from_cells(cells, 2, limits)
+  let expected = Moc::from_ascii("0/5-7 11 1/11 2/150", limits)
+  assert_true(actual.equals(expected))
+  assert_eq(actual.max_order(), expected.max_order())
+}
+
+///|
+test "moc oracle cells-47" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii("0/0-11", limits)
+  moc_oracle_assert(
+    "cells-47",
+    actual,
+    0,
+    [(0, 805306368)],
+    [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+    "0/0-11",
+    "{\"0\":[0,1,2,3,4,5,6,7,8,9,10,11]}",
+  )
+}
+
+///|
+test "moc oracle JSON cells-47" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii("0/0-11", limits)
+  let json = Moc::from_json(
+    "{\n  \"0\": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]\n}", limits,
+  )
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle normalize cells-47" {
+  let limits = MocLimits::default()
+  let cells = [
+    Cell::new(Grid::from_level(0), 1),
+    Cell::new(Grid::from_level(0), 4),
+    Cell::new(Grid::from_level(0), 7),
+    Cell::new(Grid::from_level(0), 3),
+    Cell::new(Grid::from_level(0), 10),
+    Cell::new(Grid::from_level(0), 4),
+    Cell::new(Grid::from_level(0), 5),
+    Cell::new(Grid::from_level(0), 6),
+    Cell::new(Grid::from_level(0), 11),
+    Cell::new(Grid::from_level(0), 9),
+    Cell::new(Grid::from_level(0), 0),
+    Cell::new(Grid::from_level(0), 7),
+    Cell::new(Grid::from_level(0), 8),
+    Cell::new(Grid::from_level(0), 3),
+    Cell::new(Grid::from_level(0), 9),
+    Cell::new(Grid::from_level(0), 1),
+    Cell::new(Grid::from_level(0), 8),
+    Cell::new(Grid::from_level(0), 9),
+    Cell::new(Grid::from_level(0), 8),
+    Cell::new(Grid::from_level(0), 1),
+    Cell::new(Grid::from_level(0), 2),
+    Cell::new(Grid::from_level(0), 4),
+    Cell::new(Grid::from_level(0), 6),
+    Cell::new(Grid::from_level(0), 3),
+    Cell::new(Grid::from_level(0), 2),
+    Cell::new(Grid::from_level(0), 11),
+    Cell::new(Grid::from_level(0), 2),
+    Cell::new(Grid::from_level(0), 11),
+    Cell::new(Grid::from_level(0), 5),
+    Cell::new(Grid::from_level(0), 0),
+    Cell::new(Grid::from_level(0), 6),
+    Cell::new(Grid::from_level(0), 6),
+    Cell::new(Grid::from_level(0), 7),
+    Cell::new(Grid::from_level(0), 4),
+    Cell::new(Grid::from_level(0), 3),
+    Cell::new(Grid::from_level(0), 1),
+    Cell::new(Grid::from_level(0), 4),
+    Cell::new(Grid::from_level(0), 7),
+    Cell::new(Grid::from_level(0), 9),
+    Cell::new(Grid::from_level(0), 1),
+    Cell::new(Grid::from_level(0), 0),
+    Cell::new(Grid::from_level(0), 5),
+    Cell::new(Grid::from_level(0), 9),
+    Cell::new(Grid::from_level(0), 0),
+    Cell::new(Grid::from_level(0), 8),
+    Cell::new(Grid::from_level(0), 6),
+    Cell::new(Grid::from_level(0), 3),
+    Cell::new(Grid::from_level(0), 10),
+    Cell::new(Grid::from_level(0), 8),
+    Cell::new(Grid::from_level(0), 11),
+    Cell::new(Grid::from_level(0), 8),
+    Cell::new(Grid::from_level(0), 8),
+    Cell::new(Grid::from_level(0), 0),
+    Cell::new(Grid::from_level(0), 11),
+    Cell::new(Grid::from_level(0), 5),
+    Cell::new(Grid::from_level(0), 9),
+    Cell::new(Grid::from_level(0), 10),
+    Cell::new(Grid::from_level(0), 7),
+    Cell::new(Grid::from_level(0), 2),
+    Cell::new(Grid::from_level(0), 6),
+    Cell::new(Grid::from_level(0), 4),
+    Cell::new(Grid::from_level(0), 1),
+    Cell::new(Grid::from_level(0), 10),
+    Cell::new(Grid::from_level(0), 9),
+  ]
+  let actual = Moc::from_cells(cells, 0, limits)
+  let expected = Moc::from_ascii("0/0-11", limits)
+  assert_true(actual.equals(expected))
+  assert_eq(actual.max_order(), expected.max_order())
+}
+
+///|
+test "moc oracle cells-48" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii(
+    "1/28 2/75 98 145 188 3/59 4/366 1452 5/802 1698 2389 5350 6/2409 32017 36118 7/16766 57942 89636 143808 8/115297 526433 533716 554738 744227 9/879066 1532180 2549256 2980126 3125582 10/5367 6371722 11/23813483 12/178680974 180273484 13/",
+    limits,
+  )
+  moc_oracle_assert(
+    "cells-48",
+    actual,
+    13,
+    [
+      (343488, 343552),
+      (39469056, 39485440),
+      (52559872, 52625408),
+      (61865984, 62914560),
+      (68673536, 68677632),
+      (95944704, 96206848),
+      (111280128, 111345664),
+      (118064128, 118065152),
+      (156565504, 156631040),
+      (225040896, 225041152),
+      (237330432, 237334528),
+      (314572800, 318767104),
+      (350617600, 350683136),
+      (367149056, 367153152),
+      (380633088, 380895232),
+      (381015728, 381015744),
+      (392238080, 392238336),
+      (407790208, 407790272),
+      (411041792, 415236096),
+      (469762048, 486539264),
+      (524566528, 524582912),
+      (539067392, 539068416),
+      (546525184, 546526208),
+      (568051712, 568052736),
+      (589037568, 589041664),
+      (591757312, 591773696),
+      (608174080, 612368384),
+      (652609536, 652609792),
+      (714723896, 714723900),
+      (721093936, 721093940),
+      (762088448, 762089472),
+      (762912256, 762912512),
+      (788529152, 792723456),
+      (800148992, 800149248),
+    ],
+    [
+      44, 139, 162, 209, 252, 315, 1390, 2476, 4898, 5794, 6485, 9446, 18793, 48401,
+      52502, 82302, 123478, 155172, 209344, 377441, 788577, 795860, 816882, 1006371,
+      1927642, 2580756, 3597832, 4028702, 4174158, 4199671, 10566026, 40590699, 245789838,
+      247382348,
+    ],
+    "1/28 2/75 98 145 188 3/59 4/366 1452 5/802 1698 2389 5350 6/2409 32017 36118 7/16766 57942 89636 143808 8/115297 526433 533716 554738 744227 9/879066 1532180 2549256 2980126 3125582 10/5367 6371722 11/23813483 12/178680974 180273484 13/",
+    "{\"1\":[28],\"2\":[75,98,145,188],\"3\":[59],\"4\":[366,1452],\"5\":[802,1698,2389,5350],\"6\":[2409,32017,36118],\"7\":[16766,57942,89636,143808],\"8\":[115297,526433,533716,554738,744227],\"9\":[879066,1532180,2549256,2980126,3125582],\"10\":[5367,6371722],\"11\":[23813483],\"12\":[178680974,180273484],\"13\":[]}",
+  )
+}
+
+///|
+test "moc oracle JSON cells-48" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii(
+    "1/28 2/75 98 145 188 3/59 4/366 1452 5/802 1698 2389 5350 6/2409 32017 36118 7/16766 57942 89636 143808 8/115297 526433 533716 554738 744227 9/879066 1532180 2549256 2980126 3125582 10/5367 6371722 11/23813483 12/178680974 180273484 13/",
+    limits,
+  )
+  let json = Moc::from_json(
+    "{\n  \"1\": [28],\n  \"2\": [75, 98, 145, 188],\n  \"3\": [59],\n  \"4\": [366, 1452],\n  \"5\": [802, 1698, 2389, 5350],\n  \"6\": [2409, 32017, 36118],\n  \"7\": [16766, 57942, 89636, 143808],\n  \"8\": [115297, 526433, 533716, 554738, 744227],\n  \"9\": [879066, 1532180, 2549256, 2980126, 3125582],\n  \"10\": [5367, 6371722],\n  \"11\": [23813483],\n  \"12\": [178680974, 180273484],\n  \"13\": []\n}",
+    limits,
+  )
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle normalize cells-48" {
+  let limits = MocLimits::default()
+  let cells = [
+    Cell::new(Grid::from_level(9), 2549256),
+    Cell::new(Grid::from_level(2), 115),
+    Cell::new(Grid::from_level(2), 188),
+    Cell::new(Grid::from_level(5), 5350),
+    Cell::new(Grid::from_level(8), 533716),
+    Cell::new(Grid::from_level(8), 526433),
+    Cell::new(Grid::from_level(9), 3125582),
+    Cell::new(Grid::from_level(8), 115297),
+    Cell::new(Grid::from_level(5), 1698),
+    Cell::new(Grid::from_level(10), 6371722),
+    Cell::new(Grid::from_level(6), 32017),
+    Cell::new(Grid::from_level(4), 1452),
+    Cell::new(Grid::from_level(8), 554738),
+    Cell::new(Grid::from_level(2), 145),
+    Cell::new(Grid::from_level(9), 2980126),
+    Cell::new(Grid::from_level(6), 36118),
+    Cell::new(Grid::from_level(7), 57942),
+    Cell::new(Grid::from_level(12), 180273484),
+    Cell::new(Grid::from_level(9), 879066),
+    Cell::new(Grid::from_level(7), 16766),
+    Cell::new(Grid::from_level(10), 5367),
+    Cell::new(Grid::from_level(12), 178680974),
+    Cell::new(Grid::from_level(4), 366),
+    Cell::new(Grid::from_level(7), 143808),
+    Cell::new(Grid::from_level(1), 28),
+    Cell::new(Grid::from_level(3), 59),
+    Cell::new(Grid::from_level(8), 744227),
+    Cell::new(Grid::from_level(5), 802),
+    Cell::new(Grid::from_level(6), 2409),
+    Cell::new(Grid::from_level(9), 1532180),
+    Cell::new(Grid::from_level(7), 89636),
+    Cell::new(Grid::from_level(5), 2389),
+    Cell::new(Grid::from_level(2), 75),
+    Cell::new(Grid::from_level(11), 23813483),
+    Cell::new(Grid::from_level(2), 98),
+  ]
+  let actual = Moc::from_cells(cells, 13, limits)
+  let expected = Moc::from_ascii(
+    "1/28 2/75 98 145 188 3/59 4/366 1452 5/802 1698 2389 5350 6/2409 32017 36118 7/16766 57942 89636 143808 8/115297 526433 533716 554738 744227 9/879066 1532180 2549256 2980126 3125582 10/5367 6371722 11/23813483 12/178680974 180273484 13/",
+    limits,
+  )
+  assert_true(actual.equals(expected))
+  assert_eq(actual.max_order(), expected.max_order())
+}
+
+///|
+test "moc oracle cells-49" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii(
+    "0/2 6-7 1/32 2/51 162 3/224 4/320 1092 2208 2353 2432 5/11 8934 11452 6/4380 12428 34930 38203",
+    limits,
+  )
+  moc_oracle_assert(
+    "cells-49",
+    actual,
+    6,
+    [
+      (720896, 786432),
+      (71761920, 71778304),
+      (83886080, 84148224),
+      (134217728, 201326592),
+      (203620352, 203636736),
+      (213909504, 218103808),
+      (234881024, 235929600),
+      (286261248, 286523392),
+      (402653184, 553648128),
+      (572293120, 572309504),
+      (578813952, 579076096),
+      (585498624, 585564160),
+      (616824832, 617086976),
+      (625917952, 625934336),
+      (637534208, 637796352),
+      (679477248, 683671552),
+      (750518272, 750583808),
+    ],
+    [
+      6, 10, 11, 48, 115, 226, 480, 1344, 2116, 3232, 3377, 3456, 4107, 13030, 15548,
+      20764, 28812, 51314, 54587,
+    ],
+    "0/2 6-7 1/32 2/51 162 3/224 4/320 1092 2208 2353 2432 5/11 8934 11452 6/4380 12428 34930 38203",
+    "{\"0\":[2,6,7],\"1\":[32],\"2\":[51,162],\"3\":[224],\"4\":[320,1092,2208,2353,2432],\"5\":[11,8934,11452],\"6\":[4380,12428,34930,38203]}",
+  )
+}
+
+///|
+test "moc oracle JSON cells-49" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii(
+    "0/2 6-7 1/32 2/51 162 3/224 4/320 1092 2208 2353 2432 5/11 8934 11452 6/4380 12428 34930 38203",
+    limits,
+  )
+  let json = Moc::from_json(
+    "{\n  \"0\": [2, 6, 7],\n  \"1\": [32],\n  \"2\": [51, 162],\n  \"3\": [224],\n  \"4\": [320, 1092, 2208, 2353, 2432],\n  \"5\": [11, 8934, 11452],\n  \"6\": [4380, 12428, 34930, 38203]\n}",
+    limits,
+  )
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle normalize cells-49" {
+  let limits = MocLimits::default()
+  let cells = [
+    Cell::new(Grid::from_level(6), 34930),
+    Cell::new(Grid::from_level(5), 11452),
+    Cell::new(Grid::from_level(0), 6),
+    Cell::new(Grid::from_level(0), 7),
+    Cell::new(Grid::from_level(1), 32),
+    Cell::new(Grid::from_level(5), 11),
+    Cell::new(Grid::from_level(3), 388),
+    Cell::new(Grid::from_level(2), 117),
+    Cell::new(Grid::from_level(2), 162),
+    Cell::new(Grid::from_level(3), 207),
+    Cell::new(Grid::from_level(5), 8934),
+    Cell::new(Grid::from_level(5), 6800),
+    Cell::new(Grid::from_level(2), 104),
+    Cell::new(Grid::from_level(4), 2432),
+    Cell::new(Grid::from_level(0), 2),
+    Cell::new(Grid::from_level(6), 12428),
+    Cell::new(Grid::from_level(5), 7663),
+    Cell::new(Grid::from_level(4), 1981),
+    Cell::new(Grid::from_level(4), 320),
+    Cell::new(Grid::from_level(2), 113),
+    Cell::new(Grid::from_level(6), 4380),
+    Cell::new(Grid::from_level(3), 224),
+    Cell::new(Grid::from_level(6), 38203),
+    Cell::new(Grid::from_level(2), 51),
+    Cell::new(Grid::from_level(4), 2353),
+    Cell::new(Grid::from_level(1), 30),
+    Cell::new(Grid::from_level(4), 1092),
+    Cell::new(Grid::from_level(4), 2208),
+    Cell::new(Grid::from_level(5), 2354),
+  ]
+  let actual = Moc::from_cells(cells, 6, limits)
+  let expected = Moc::from_ascii(
+    "0/2 6-7 1/32 2/51 162 3/224 4/320 1092 2208 2353 2432 5/11 8934 11452 6/4380 12428 34930 38203",
+    limits,
+  )
+  assert_true(actual.equals(expected))
+  assert_eq(actual.max_order(), expected.max_order())
+}
+
+///|
+test "moc oracle cells-50" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii(
+    "0/1 1/29 2/53 99 113 3/650 733 4/2551 3057 5/91 2438 5665 6119 7/35007 8/5150 9/2533403 10/7999132",
+    limits,
+  )
+  moc_oracle_assert(
+    "cells-50",
+    actual,
+    10,
+    [
+      (5273600, 5274624),
+      (5963776, 6029312),
+      (67108864, 134217728),
+      (143388672, 143392768),
+      (159776768, 159842304),
+      (222298112, 226492416),
+      (371261440, 371326976),
+      (401014784, 401080320),
+      (415236096, 419430400),
+      (473956352, 478150656),
+      (486539264, 503316480),
+      (511944448, 511944512),
+      (648551168, 648551424),
+      (668729344, 668991488),
+      (681574400, 682622976),
+      (768606208, 769654784),
+      (801374208, 801636352),
+    ],
+    [
+      5, 45, 117, 163, 177, 906, 989, 3575, 4081, 4187, 6534, 9761, 10215, 100543,
+      267294, 3581979, 12193436,
+    ],
+    "0/1 1/29 2/53 99 113 3/650 733 4/2551 3057 5/91 2438 5665 6119 7/35007 8/5150 9/2533403 10/7999132",
+    "{\"0\":[1],\"1\":[29],\"2\":[53,99,113],\"3\":[650,733],\"4\":[2551,3057],\"5\":[91,2438,5665,6119],\"7\":[35007],\"8\":[5150],\"9\":[2533403],\"10\":[7999132]}",
+  )
+}
+
+///|
+test "moc oracle JSON cells-50" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii(
+    "0/1 1/29 2/53 99 113 3/650 733 4/2551 3057 5/91 2438 5665 6119 7/35007 8/5150 9/2533403 10/7999132",
+    limits,
+  )
+  let json = Moc::from_json(
+    "{\n  \"0\": [1],\n  \"1\": [29],\n  \"2\": [53, 99, 113],\n  \"3\": [650, 733],\n  \"4\": [2551, 3057],\n  \"5\": [91, 2438, 5665, 6119],\n  \"7\": [35007],\n  \"8\": [5150],\n  \"9\": [2533403],\n  \"10\": [7999132]\n}",
+    limits,
+  )
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle normalize cells-50" {
+  let limits = MocLimits::default()
+  let cells = [
+    Cell::new(Grid::from_level(9), 2533403),
+    Cell::new(Grid::from_level(5), 6119),
+    Cell::new(Grid::from_level(7), 35007),
+    Cell::new(Grid::from_level(8), 5150),
+    Cell::new(Grid::from_level(0), 1),
+    Cell::new(Grid::from_level(7), 17609),
+    Cell::new(Grid::from_level(5), 5665),
+    Cell::new(Grid::from_level(3), 733),
+    Cell::new(Grid::from_level(10), 7999132),
+    Cell::new(Grid::from_level(1), 29),
+    Cell::new(Grid::from_level(2), 53),
+    Cell::new(Grid::from_level(2), 113),
+    Cell::new(Grid::from_level(4), 2551),
+    Cell::new(Grid::from_level(4), 286),
+    Cell::new(Grid::from_level(4), 3057),
+    Cell::new(Grid::from_level(3), 650),
+    Cell::new(Grid::from_level(5), 91),
+    Cell::new(Grid::from_level(2), 99),
+    Cell::new(Grid::from_level(5), 2438),
+  ]
+  let actual = Moc::from_cells(cells, 10, limits)
+  let expected = Moc::from_ascii(
+    "0/1 1/29 2/53 99 113 3/650 733 4/2551 3057 5/91 2438 5665 6119 7/35007 8/5150 9/2533403 10/7999132",
+    limits,
+  )
+  assert_true(actual.equals(expected))
+  assert_eq(actual.max_order(), expected.max_order())
+}
+
+///|
+test "moc oracle cells-51" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii("0/1 3/49 6/33404 7/54809 113643 8/", limits)
+  moc_oracle_assert(
+    "cells-51",
+    actual,
+    8,
+    [
+      (51380224, 52428800),
+      (67108864, 134217728),
+      (224497664, 224501760),
+      (465481728, 465485824),
+      (547291136, 547307520),
+    ],
+    [5, 305, 49788, 120345, 179179],
+    "0/1 3/49 6/33404 7/54809 113643 8/",
+    "{\"0\":[1],\"3\":[49],\"6\":[33404],\"7\":[54809,113643],\"8\":[]}",
+  )
+}
+
+///|
+test "moc oracle JSON cells-51" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii("0/1 3/49 6/33404 7/54809 113643 8/", limits)
+  let json = Moc::from_json(
+    "{\n  \"0\": [1],\n  \"3\": [49],\n  \"6\": [33404],\n  \"7\": [54809, 113643],\n  \"8\": []\n}",
+    limits,
+  )
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle normalize cells-51" {
+  let limits = MocLimits::default()
+  let cells = [
+    Cell::new(Grid::from_level(0), 1),
+    Cell::new(Grid::from_level(3), 49),
+    Cell::new(Grid::from_level(7), 54809),
+    Cell::new(Grid::from_level(7), 113643),
+    Cell::new(Grid::from_level(6), 33404),
+  ]
+  let actual = Moc::from_cells(cells, 8, limits)
+  let expected = Moc::from_ascii("0/1 3/49 6/33404 7/54809 113643 8/", limits)
+  assert_true(actual.equals(expected))
+  assert_eq(actual.max_order(), expected.max_order())
+}
+
+///|
+test "moc oracle cells-52" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii(
+    "0/1 3 5-6 1/29 2/75 3/566 569 4/2236 2536 5/4532 4731 6/2188 9595 33843 42702 44088 7/42677 169077 8/136485 550161 10/4506105",
+    limits,
+  )
+  moc_oracle_assert(
+    "cells-52",
+    actual,
+    10,
+    [
+      (35848192, 35864576),
+      (67108864, 134217728),
+      (139760640, 139761664),
+      (157204480, 157220864),
+      (174804992, 174809088),
+      (201326592, 268435456),
+      (288390720, 288390784),
+      (297009152, 297074688),
+      (310050816, 310116352),
+      (314572800, 318767104),
+      (335544320, 469762048),
+      (486539264, 503316480),
+      (554483712, 554500096),
+      (563364864, 563365888),
+      (586153984, 586416128),
+      (593494016, 594542592),
+      (596639744, 597688320),
+      (664797184, 665059328),
+      (692539392, 692543488),
+      (699629568, 699645952),
+      (722337792, 722354176),
+    ],
+    [
+      5, 7, 9, 10, 45, 139, 822, 825, 3260, 3560, 8628, 8827, 18572, 25979, 50227,
+      59086, 60472, 108213, 234613, 398629, 812305, 8700409,
+    ],
+    "0/1 3 5-6 1/29 2/75 3/566 569 4/2236 2536 5/4532 4731 6/2188 9595 33843 42702 44088 7/42677 169077 8/136485 550161 10/4506105",
+    "{\"0\":[1,3,5,6],\"1\":[29],\"2\":[75],\"3\":[566,569],\"4\":[2236,2536],\"5\":[4532,4731],\"6\":[2188,9595,33843,42702,44088],\"7\":[42677,169077],\"8\":[136485,550161],\"10\":[4506105]}",
+  )
+}
+
+///|
+test "moc oracle JSON cells-52" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii(
+    "0/1 3 5-6 1/29 2/75 3/566 569 4/2236 2536 5/4532 4731 6/2188 9595 33843 42702 44088 7/42677 169077 8/136485 550161 10/4506105",
+    limits,
+  )
+  let json = Moc::from_json(
+    "{\n  \"0\": [1, 3, 5, 6],\n  \"1\": [29],\n  \"2\": [75],\n  \"3\": [566, 569],\n  \"4\": [2236, 2536],\n  \"5\": [4532, 4731],\n  \"6\": [2188, 9595, 33843, 42702, 44088],\n  \"7\": [42677, 169077],\n  \"8\": [136485, 550161],\n  \"10\": [4506105]\n}",
+    limits,
+  )
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle normalize cells-52" {
+  let limits = MocLimits::default()
+  let cells = [
+    Cell::new(Grid::from_level(6), 9595),
+    Cell::new(Grid::from_level(1), 12),
+    Cell::new(Grid::from_level(1), 29),
+    Cell::new(Grid::from_level(0), 1),
+    Cell::new(Grid::from_level(0), 3),
+    Cell::new(Grid::from_level(8), 136485),
+    Cell::new(Grid::from_level(10), 5495947),
+    Cell::new(Grid::from_level(2), 85),
+    Cell::new(Grid::from_level(5), 5230),
+    Cell::new(Grid::from_level(10), 1415403),
+    Cell::new(Grid::from_level(10), 3838651),
+    Cell::new(Grid::from_level(8), 550161),
+    Cell::new(Grid::from_level(3), 229),
+    Cell::new(Grid::from_level(3), 197),
+    Cell::new(Grid::from_level(6), 6546),
+    Cell::new(Grid::from_level(6), 44088),
+    Cell::new(Grid::from_level(2), 75),
+    Cell::new(Grid::from_level(3), 119),
+    Cell::new(Grid::from_level(0), 5),
+    Cell::new(Grid::from_level(5), 4731),
+    Cell::new(Grid::from_level(4), 2236),
+    Cell::new(Grid::from_level(1), 15),
+    Cell::new(Grid::from_level(7), 169077),
+    Cell::new(Grid::from_level(0), 6),
+    Cell::new(Grid::from_level(6), 28220),
+    Cell::new(Grid::from_level(3), 566),
+    Cell::new(Grid::from_level(4), 2536),
+    Cell::new(Grid::from_level(5), 4532),
+    Cell::new(Grid::from_level(6), 27078),
+    Cell::new(Grid::from_level(7), 42677),
+    Cell::new(Grid::from_level(3), 566),
+    Cell::new(Grid::from_level(6), 33843),
+    Cell::new(Grid::from_level(3), 569),
+    Cell::new(Grid::from_level(10), 4506105),
+    Cell::new(Grid::from_level(10), 6344686),
+    Cell::new(Grid::from_level(1), 4),
+    Cell::new(Grid::from_level(0), 6),
+    Cell::new(Grid::from_level(1), 4),
+    Cell::new(Grid::from_level(3), 410),
+    Cell::new(Grid::from_level(1), 13),
+    Cell::new(Grid::from_level(6), 2188),
+    Cell::new(Grid::from_level(0), 5),
+    Cell::new(Grid::from_level(6), 42702),
+    Cell::new(Grid::from_level(10), 5322840),
+    Cell::new(Grid::from_level(0), 6),
+    Cell::new(Grid::from_level(7), 50203),
+    Cell::new(Grid::from_level(8), 236856),
+  ]
+  let actual = Moc::from_cells(cells, 10, limits)
+  let expected = Moc::from_ascii(
+    "0/1 3 5-6 1/29 2/75 3/566 569 4/2236 2536 5/4532 4731 6/2188 9595 33843 42702 44088 7/42677 169077 8/136485 550161 10/4506105",
+    limits,
+  )
+  assert_true(actual.equals(expected))
+  assert_eq(actual.max_order(), expected.max_order())
+}
+
+///|
+test "moc oracle cells-53" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii(
+    "0/1 3 7-10 1/24 26 2/78 81 100 176 182 188 3/50 320 347 361 4/115", limits,
+  )
+  moc_oracle_assert(
+    "cells-53",
+    actual,
+    4,
+    [
+      (30146560, 30408704),
+      (52428800, 53477376),
+      (67108864, 134217728),
+      (201326592, 268435456),
+      (327155712, 331350016),
+      (335544320, 336592896),
+      (339738624, 343932928),
+      (363855872, 364904448),
+      (378535936, 379584512),
+      (402653184, 423624704),
+      (436207616, 452984832),
+      (469762048, 742391808),
+      (763363328, 767557632),
+      (788529152, 792723456),
+    ],
+    [
+      5, 7, 11, 12, 13, 14, 40, 42, 142, 145, 164, 240, 246, 252, 306, 576, 603,
+      617, 1139,
+    ],
+    "0/1 3 7-10 1/24 26 2/78 81 100 176 182 188 3/50 320 347 361 4/115",
+    "{\"0\":[1,3,7,8,9,10],\"1\":[24,26],\"2\":[78,81,100,176,182,188],\"3\":[50,320,347,361],\"4\":[115]}",
+  )
+}
+
+///|
+test "moc oracle JSON cells-53" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii(
+    "0/1 3 7-10 1/24 26 2/78 81 100 176 182 188 3/50 320 347 361 4/115", limits,
+  )
+  let json = Moc::from_json(
+    "{\n  \"0\": [1, 3, 7, 8, 9, 10],\n  \"1\": [24, 26],\n  \"2\": [78, 81, 100, 176, 182, 188],\n  \"3\": [50, 320, 347, 361],\n  \"4\": [115]\n}",
+    limits,
+  )
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle normalize cells-53" {
+  let limits = MocLimits::default()
+  let cells = [
+    Cell::new(Grid::from_level(0), 1),
+    Cell::new(Grid::from_level(4), 115),
+    Cell::new(Grid::from_level(0), 1),
+    Cell::new(Grid::from_level(1), 26),
+    Cell::new(Grid::from_level(0), 8),
+    Cell::new(Grid::from_level(3), 754),
+    Cell::new(Grid::from_level(2), 164),
+    Cell::new(Grid::from_level(0), 1),
+    Cell::new(Grid::from_level(3), 563),
+    Cell::new(Grid::from_level(2), 100),
+    Cell::new(Grid::from_level(2), 182),
+    Cell::new(Grid::from_level(2), 81),
+    Cell::new(Grid::from_level(3), 665),
+    Cell::new(Grid::from_level(2), 188),
+    Cell::new(Grid::from_level(1), 36),
+    Cell::new(Grid::from_level(0), 10),
+    Cell::new(Grid::from_level(2), 176),
+    Cell::new(Grid::from_level(0), 10),
+    Cell::new(Grid::from_level(4), 2676),
+    Cell::new(Grid::from_level(1), 24),
+    Cell::new(Grid::from_level(2), 78),
+    Cell::new(Grid::from_level(3), 568),
+    Cell::new(Grid::from_level(3), 50),
+    Cell::new(Grid::from_level(3), 347),
+    Cell::new(Grid::from_level(2), 98),
+    Cell::new(Grid::from_level(0), 9),
+    Cell::new(Grid::from_level(1), 13),
+    Cell::new(Grid::from_level(2), 169),
+    Cell::new(Grid::from_level(0), 7),
+    Cell::new(Grid::from_level(2), 123),
+    Cell::new(Grid::from_level(3), 361),
+    Cell::new(Grid::from_level(3), 510),
+    Cell::new(Grid::from_level(4), 2159),
+    Cell::new(Grid::from_level(3), 320),
+    Cell::new(Grid::from_level(0), 8),
+    Cell::new(Grid::from_level(0), 3),
+  ]
+  let actual = Moc::from_cells(cells, 4, limits)
+  let expected = Moc::from_ascii(
+    "0/1 3 7-10 1/24 26 2/78 81 100 176 182 188 3/50 320 347 361 4/115", limits,
+  )
+  assert_true(actual.equals(expected))
+  assert_eq(actual.max_order(), expected.max_order())
+}
+
+///|
+test "moc oracle cells-54" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii(
+    "0/2 4-6 11 1/4-6 34 36 2/1 128 160 3/18 4/97 2020 2578 5/8699 10224 11100 7/166427",
+    limits,
+  )
+  moc_oracle_assert(
+    "cells-54",
+    actual,
+    7,
+    [
+      (4194304, 8388608),
+      (18874368, 19922944),
+      (25427968, 25690112),
+      (67108864, 117440512),
+      (134217728, 201326592),
+      (268435456, 469762048),
+      (529530880, 529793024),
+      (536870912, 541065216),
+      (570097664, 570163200),
+      (570425344, 587202560),
+      (603979776, 620756992),
+      (670040064, 670105600),
+      (671088640, 675282944),
+      (675807232, 676069376),
+      (681684992, 681689088),
+      (727449600, 727515136),
+      (738197504, 805306368),
+    ],
+    [
+      6, 8, 9, 10, 15, 20, 21, 22, 50, 52, 65, 192, 224, 274, 1121, 3044, 3602, 12795,
+      14320, 15196, 231963,
+    ],
+    "0/2 4-6 11 1/4-6 34 36 2/1 128 160 3/18 4/97 2020 2578 5/8699 10224 11100 7/166427",
+    "{\"0\":[2,4,5,6,11],\"1\":[4,5,6,34,36],\"2\":[1,128,160],\"3\":[18],\"4\":[97,2020,2578],\"5\":[8699,10224,11100],\"7\":[166427]}",
+  )
+}
+
+///|
+test "moc oracle JSON cells-54" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii(
+    "0/2 4-6 11 1/4-6 34 36 2/1 128 160 3/18 4/97 2020 2578 5/8699 10224 11100 7/166427",
+    limits,
+  )
+  let json = Moc::from_json(
+    "{\n  \"0\": [2, 4, 5, 6, 11],\n  \"1\": [4, 5, 6, 34, 36],\n  \"2\": [1, 128, 160],\n  \"3\": [18],\n  \"4\": [97, 2020, 2578],\n  \"5\": [8699, 10224, 11100],\n  \"7\": [166427]\n}",
+    limits,
+  )
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle normalize cells-54" {
+  let limits = MocLimits::default()
+  let cells = [
+    Cell::new(Grid::from_level(6), 28145),
+    Cell::new(Grid::from_level(1), 5),
+    Cell::new(Grid::from_level(1), 34),
+    Cell::new(Grid::from_level(7), 16803),
+    Cell::new(Grid::from_level(0), 2),
+    Cell::new(Grid::from_level(3), 755),
+    Cell::new(Grid::from_level(4), 2020),
+    Cell::new(Grid::from_level(6), 23170),
+    Cell::new(Grid::from_level(7), 166427),
+    Cell::new(Grid::from_level(5), 10224),
+    Cell::new(Grid::from_level(0), 4),
+    Cell::new(Grid::from_level(5), 8699),
+    Cell::new(Grid::from_level(2), 128),
+    Cell::new(Grid::from_level(4), 2578),
+    Cell::new(Grid::from_level(7), 40028),
+    Cell::new(Grid::from_level(4), 3023),
+    Cell::new(Grid::from_level(0), 6),
+    Cell::new(Grid::from_level(5), 5332),
+    Cell::new(Grid::from_level(3), 18),
+    Cell::new(Grid::from_level(3), 107),
+    Cell::new(Grid::from_level(1), 6),
+    Cell::new(Grid::from_level(2), 1),
+    Cell::new(Grid::from_level(0), 5),
+    Cell::new(Grid::from_level(0), 11),
+    Cell::new(Grid::from_level(1), 4),
+    Cell::new(Grid::from_level(3), 294),
+    Cell::new(Grid::from_level(1), 36),
+    Cell::new(Grid::from_level(3), 306),
+    Cell::new(Grid::from_level(2), 160),
+    Cell::new(Grid::from_level(4), 1517),
+    Cell::new(Grid::from_level(4), 31),
+    Cell::new(Grid::from_level(5), 11100),
+    Cell::new(Grid::from_level(4), 97),
+  ]
+  let actual = Moc::from_cells(cells, 7, limits)
+  let expected = Moc::from_ascii(
+    "0/2 4-6 11 1/4-6 34 36 2/1 128 160 3/18 4/97 2020 2578 5/8699 10224 11100 7/166427",
+    limits,
+  )
+  assert_true(actual.equals(expected))
+  assert_eq(actual.max_order(), expected.max_order())
+}
+
+///|
+test "moc oracle cells-55" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii(
+    "0/0-1 6 8-9 11 1/13 21 2/42 164 3/668 700", limits,
+  )
+  moc_oracle_assert(
+    "cells-55",
+    actual,
+    3,
+    [
+      (0, 134217728),
+      (176160768, 180355072),
+      (218103808, 234881024),
+      (352321536, 369098752),
+      (402653184, 469762048),
+      (536870912, 671088640),
+      (687865856, 692060160),
+      (700448768, 701497344),
+      (734003200, 735051776),
+      (738197504, 805306368),
+    ],
+    [4, 5, 10, 12, 13, 15, 29, 37, 106, 228, 924, 956],
+    "0/0-1 6 8-9 11 1/13 21 2/42 164 3/668 700",
+    "{\"0\":[0,1,6,8,9,11],\"1\":[13,21],\"2\":[42,164],\"3\":[668,700]}",
+  )
+}
+
+///|
+test "moc oracle JSON cells-55" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii(
+    "0/0-1 6 8-9 11 1/13 21 2/42 164 3/668 700", limits,
+  )
+  let json = Moc::from_json(
+    "{\n  \"0\": [0, 1, 6, 8, 9, 11],\n  \"1\": [13, 21],\n  \"2\": [42, 164],\n  \"3\": [668, 700]\n}",
+    limits,
+  )
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle normalize cells-55" {
+  let limits = MocLimits::default()
+  let cells = [
+    Cell::new(Grid::from_level(1), 21),
+    Cell::new(Grid::from_level(3), 72),
+    Cell::new(Grid::from_level(0), 9),
+    Cell::new(Grid::from_level(2), 103),
+    Cell::new(Grid::from_level(2), 42),
+    Cell::new(Grid::from_level(3), 668),
+    Cell::new(Grid::from_level(1), 13),
+    Cell::new(Grid::from_level(0), 0),
+    Cell::new(Grid::from_level(0), 8),
+    Cell::new(Grid::from_level(3), 53),
+    Cell::new(Grid::from_level(0), 1),
+    Cell::new(Grid::from_level(3), 210),
+    Cell::new(Grid::from_level(1), 6),
+    Cell::new(Grid::from_level(2), 164),
+    Cell::new(Grid::from_level(0), 11),
+    Cell::new(Grid::from_level(3), 19),
+    Cell::new(Grid::from_level(3), 700),
+    Cell::new(Grid::from_level(0), 6),
+  ]
+  let actual = Moc::from_cells(cells, 3, limits)
+  let expected = Moc::from_ascii(
+    "0/0-1 6 8-9 11 1/13 21 2/42 164 3/668 700", limits,
+  )
+  assert_true(actual.equals(expected))
+  assert_eq(actual.max_order(), expected.max_order())
+}
+
+///|
+test "moc oracle cells-56" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii("0/2 1/2 7 34 2/181-182", limits)
+  moc_oracle_assert(
+    "cells-56",
+    actual,
+    2,
+    [
+      (33554432, 50331648),
+      (117440512, 201326592),
+      (570425344, 587202560),
+      (759169024, 767557632),
+    ],
+    [6, 18, 23, 50, 245, 246],
+    "0/2 1/2 7 34 2/181-182",
+    "{\"0\":[2],\"1\":[2,7,34],\"2\":[181,182]}",
+  )
+}
+
+///|
+test "moc oracle JSON cells-56" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii("0/2 1/2 7 34 2/181-182", limits)
+  let json = Moc::from_json(
+    "{\n  \"0\": [2],\n  \"1\": [2, 7, 34],\n  \"2\": [181, 182]\n}", limits,
+  )
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle normalize cells-56" {
+  let limits = MocLimits::default()
+  let cells = [
+    Cell::new(Grid::from_level(2), 181),
+    Cell::new(Grid::from_level(1), 7),
+    Cell::new(Grid::from_level(0), 2),
+    Cell::new(Grid::from_level(0), 2),
+    Cell::new(Grid::from_level(1), 2),
+    Cell::new(Grid::from_level(2), 182),
+    Cell::new(Grid::from_level(1), 34),
+  ]
+  let actual = Moc::from_cells(cells, 2, limits)
+  let expected = Moc::from_ascii("0/2 1/2 7 34 2/181-182", limits)
+  assert_true(actual.equals(expected))
+  assert_eq(actual.max_order(), expected.max_order())
+}
+
+///|
+test "moc oracle cells-57" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii(
+    "0/1-6 9-10 1/28 31 35 47 2/131 179 181 185 3/722", limits,
+  )
+  moc_oracle_assert(
+    "cells-57",
+    actual,
+    3,
+    [
+      (67108864, 486539264),
+      (520093696, 536870912),
+      (549453824, 553648128),
+      (587202560, 738197504),
+      (750780416, 754974720),
+      (757071872, 758120448),
+      (759169024, 763363328),
+      (775946240, 780140544),
+      (788529152, 805306368),
+    ],
+    [5, 6, 7, 8, 9, 10, 13, 14, 44, 47, 51, 63, 195, 243, 245, 249, 978],
+    "0/1-6 9-10 1/28 31 35 47 2/131 179 181 185 3/722",
+    "{\"0\":[1,2,3,4,5,6,9,10],\"1\":[28,31,35,47],\"2\":[131,179,181,185],\"3\":[722]}",
+  )
+}
+
+///|
+test "moc oracle JSON cells-57" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii(
+    "0/1-6 9-10 1/28 31 35 47 2/131 179 181 185 3/722", limits,
+  )
+  let json = Moc::from_json(
+    "{\n  \"0\": [1, 2, 3, 4, 5, 6, 9, 10],\n  \"1\": [28, 31, 35, 47],\n  \"2\": [131, 179, 181, 185],\n  \"3\": [722]\n}",
+    limits,
+  )
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle normalize cells-57" {
+  let limits = MocLimits::default()
+  let cells = [
+    Cell::new(Grid::from_level(1), 22),
+    Cell::new(Grid::from_level(0), 3),
+    Cell::new(Grid::from_level(2), 166),
+    Cell::new(Grid::from_level(3), 197),
+    Cell::new(Grid::from_level(3), 391),
+    Cell::new(Grid::from_level(1), 20),
+    Cell::new(Grid::from_level(0), 4),
+    Cell::new(Grid::from_level(1), 39),
+    Cell::new(Grid::from_level(1), 11),
+    Cell::new(Grid::from_level(3), 722),
+    Cell::new(Grid::from_level(1), 28),
+    Cell::new(Grid::from_level(2), 63),
+    Cell::new(Grid::from_level(3), 717),
+    Cell::new(Grid::from_level(3), 593),
+    Cell::new(Grid::from_level(1), 22),
+    Cell::new(Grid::from_level(0), 10),
+    Cell::new(Grid::from_level(1), 43),
+    Cell::new(Grid::from_level(2), 131),
+    Cell::new(Grid::from_level(1), 37),
+    Cell::new(Grid::from_level(2), 166),
+    Cell::new(Grid::from_level(0), 9),
+    Cell::new(Grid::from_level(3), 311),
+    Cell::new(Grid::from_level(1), 5),
+    Cell::new(Grid::from_level(0), 2),
+    Cell::new(Grid::from_level(1), 31),
+    Cell::new(Grid::from_level(1), 35),
+    Cell::new(Grid::from_level(3), 409),
+    Cell::new(Grid::from_level(2), 62),
+    Cell::new(Grid::from_level(3), 176),
+    Cell::new(Grid::from_level(2), 73),
+    Cell::new(Grid::from_level(2), 185),
+    Cell::new(Grid::from_level(0), 1),
+    Cell::new(Grid::from_level(3), 280),
+    Cell::new(Grid::from_level(1), 12),
+    Cell::new(Grid::from_level(2), 179),
+    Cell::new(Grid::from_level(0), 5),
+    Cell::new(Grid::from_level(1), 12),
+    Cell::new(Grid::from_level(0), 5),
+    Cell::new(Grid::from_level(1), 47),
+    Cell::new(Grid::from_level(0), 5),
+    Cell::new(Grid::from_level(2), 26),
+    Cell::new(Grid::from_level(3), 347),
+    Cell::new(Grid::from_level(1), 22),
+    Cell::new(Grid::from_level(0), 6),
+    Cell::new(Grid::from_level(2), 181),
+    Cell::new(Grid::from_level(2), 56),
+  ]
+  let actual = Moc::from_cells(cells, 3, limits)
+  let expected = Moc::from_ascii(
+    "0/1-6 9-10 1/28 31 35 47 2/131 179 181 185 3/722", limits,
+  )
+  assert_true(actual.equals(expected))
+  assert_eq(actual.max_order(), expected.max_order())
+}
+
+///|
+test "moc oracle cells-58" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii(
+    "0/1 3 6 1/20 2/5 36 72 79 90 3/177 489 704 4/720 1362 2147 5/290 5034 5506 7326 8741 9676 10207 10610 6/2228 11209 24125 37611 44019 44816 7/42542 97747 151385 154991 167834 169028 8/27084 284585 490075 680726 9/206037 2486757 2557502 2667739 2949232 2966558 3090225",
+    limits,
+  )
+  moc_oracle_assert(
+    "cells-58",
+    actual,
+    9,
+    [
+      (19005440, 19070976),
+      (20971520, 25165824),
+      (27734016, 27735040),
+      (36503552, 36519936),
+      (52745472, 52745728),
+      (67108864, 134217728),
+      (150994944, 155189248),
+      (174252032, 174256128),
+      (183648256, 183664640),
+      (185597952, 186646528),
+      (188743680, 189005824),
+      (201326592, 268435456),
+      (291415040, 291416064),
+      (301989888, 306184192),
+      (329908224, 329973760),
+      (331350016, 352321536),
+      (357040128, 357302272),
+      (360841216, 360906752),
+      (377487360, 381681664),
+      (395264000, 395280384),
+      (400371712, 400375808),
+      (402653184, 469762048),
+      (480116736, 480182272),
+      (501836800, 501837824),
+      (512753664, 513802240),
+      (562823168, 563085312),
+      (572850176, 572915712),
+      (616218624, 616235008),
+      (620072960, 620077056),
+      (634126336, 634191872),
+      (634843136, 634847232),
+      (636609792, 636610048),
+      (654720512, 654720768),
+      (668925952, 668991488),
+      (682941184, 682941440),
+      (687448064, 687452160),
+      (692338688, 692342784),
+      (695336960, 695402496),
+      (697063424, 697064448),
+      (721207296, 721223680),
+      (734265344, 734281728),
+      (738197504, 739246080),
+      (755003392, 755003648),
+      (759438848, 759439104),
+      (791097600, 791097856),
+    ],
+    [
+      5, 7, 10, 36, 69, 100, 136, 143, 154, 433, 745, 960, 1744, 2386, 3171, 4386,
+      9130, 9602, 11422, 12837, 13772, 14303, 14706, 18612, 27593, 40509, 53995,
+      60403, 61200, 108078, 163283, 216921, 220527, 233370, 234564, 289228, 546729,
+      752219, 942870, 1254613, 3535333, 3606078, 3716315, 3997808, 4015134, 4138801,
+    ],
+    "0/1 3 6 1/20 2/5 36 72 79 90 3/177 489 704 4/720 1362 2147 5/290 5034 5506 7326 8741 9676 10207 10610 6/2228 11209 24125 37611 44019 44816 7/42542 97747 151385 154991 167834 169028 8/27084 284585 490075 680726 9/206037 2486757 2557502 2667739 2949232 2966558 3090225",
+    "{\"0\":[1,3,6],\"1\":[20],\"2\":[5,36,72,79,90],\"3\":[177,489,704],\"4\":[720,1362,2147],\"5\":[290,5034,5506,7326,8741,9676,10207,10610],\"6\":[2228,11209,24125,37611,44019,44816],\"7\":[42542,97747,151385,154991,167834,169028],\"8\":[27084,284585,490075,680726],\"9\":[206037,2486757,2557502,2667739,2949232,2966558,3090225]}",
+  )
+}
+
+///|
+test "moc oracle JSON cells-58" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii(
+    "0/1 3 6 1/20 2/5 36 72 79 90 3/177 489 704 4/720 1362 2147 5/290 5034 5506 7326 8741 9676 10207 10610 6/2228 11209 24125 37611 44019 44816 7/42542 97747 151385 154991 167834 169028 8/27084 284585 490075 680726 9/206037 2486757 2557502 2667739 2949232 2966558 3090225",
+    limits,
+  )
+  let json = Moc::from_json(
+    "{\n  \"0\": [1, 3, 6],\n  \"1\": [20],\n  \"2\": [5, 36, 72, 79, 90],\n  \"3\": [177, 489, 704],\n  \"4\": [720, 1362, 2147],\n  \"5\": [290, 5034, 5506, 7326, 8741, 9676, 10207, 10610],\n  \"6\": [2228, 11209, 24125, 37611, 44019, 44816],\n  \"7\": [42542, 97747, 151385, 154991, 167834, 169028],\n  \"8\": [27084, 284585, 490075, 680726],\n  \"9\": [206037, 2486757, 2557502, 2667739, 2949232, 2966558, 3090225]\n}",
+    limits,
+  )
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle normalize cells-58" {
+  let limits = MocLimits::default()
+  let cells = [
+    Cell::new(Grid::from_level(6), 24125),
+    Cell::new(Grid::from_level(7), 97747),
+    Cell::new(Grid::from_level(5), 10610),
+    Cell::new(Grid::from_level(5), 7012),
+    Cell::new(Grid::from_level(3), 90),
+    Cell::new(Grid::from_level(9), 943257),
+    Cell::new(Grid::from_level(2), 36),
+    Cell::new(Grid::from_level(4), 2147),
+    Cell::new(Grid::from_level(7), 100248),
+    Cell::new(Grid::from_level(3), 177),
+    Cell::new(Grid::from_level(7), 167834),
+    Cell::new(Grid::from_level(3), 329),
+    Cell::new(Grid::from_level(5), 10207),
+    Cell::new(Grid::from_level(3), 406),
+    Cell::new(Grid::from_level(8), 206408),
+    Cell::new(Grid::from_level(9), 2557502),
+    Cell::new(Grid::from_level(2), 5),
+    Cell::new(Grid::from_level(0), 6),
+    Cell::new(Grid::from_level(3), 489),
+    Cell::new(Grid::from_level(7), 154991),
+    Cell::new(Grid::from_level(6), 44816),
+    Cell::new(Grid::from_level(3), 208),
+    Cell::new(Grid::from_level(5), 9676),
+    Cell::new(Grid::from_level(8), 27084),
+    Cell::new(Grid::from_level(7), 169028),
+    Cell::new(Grid::from_level(1), 20),
+    Cell::new(Grid::from_level(8), 490075),
+    Cell::new(Grid::from_level(7), 151385),
+    Cell::new(Grid::from_level(7), 42542),
+    Cell::new(Grid::from_level(6), 14068),
+    Cell::new(Grid::from_level(3), 704),
+    Cell::new(Grid::from_level(5), 290),
+    Cell::new(Grid::from_level(2), 79),
+    Cell::new(Grid::from_level(2), 79),
+    Cell::new(Grid::from_level(0), 3),
+    Cell::new(Grid::from_level(5), 8741),
+    Cell::new(Grid::from_level(8), 680726),
+    Cell::new(Grid::from_level(6), 37611),
+    Cell::new(Grid::from_level(4), 720),
+    Cell::new(Grid::from_level(5), 5506),
+    Cell::new(Grid::from_level(9), 2949232),
+    Cell::new(Grid::from_level(0), 1),
+    Cell::new(Grid::from_level(3), 288),
+    Cell::new(Grid::from_level(2), 83),
+    Cell::new(Grid::from_level(9), 2486757),
+    Cell::new(Grid::from_level(9), 206037),
+    Cell::new(Grid::from_level(9), 2966558),
+    Cell::new(Grid::from_level(6), 2228),
+    Cell::new(Grid::from_level(9), 2667739),
+    Cell::new(Grid::from_level(6), 11209),
+    Cell::new(Grid::from_level(6), 44019),
+    Cell::new(Grid::from_level(0), 6),
+    Cell::new(Grid::from_level(2), 90),
+    Cell::new(Grid::from_level(4), 1362),
+    Cell::new(Grid::from_level(1), 5),
+    Cell::new(Grid::from_level(5), 7326),
+    Cell::new(Grid::from_level(8), 284585),
+    Cell::new(Grid::from_level(9), 3090225),
+    Cell::new(Grid::from_level(2), 72),
+    Cell::new(Grid::from_level(3), 114),
+    Cell::new(Grid::from_level(5), 5034),
+  ]
+  let actual = Moc::from_cells(cells, 9, limits)
+  let expected = Moc::from_ascii(
+    "0/1 3 6 1/20 2/5 36 72 79 90 3/177 489 704 4/720 1362 2147 5/290 5034 5506 7326 8741 9676 10207 10610 6/2228 11209 24125 37611 44019 44816 7/42542 97747 151385 154991 167834 169028 8/27084 284585 490075 680726 9/206037 2486757 2557502 2667739 2949232 2966558 3090225",
+    limits,
+  )
+  assert_true(actual.equals(expected))
+  assert_eq(actual.max_order(), expected.max_order())
+}
+
+///|
+test "moc oracle cells-59" {
+  let limits = MocLimits::default()
+  let actual = Moc::from_ascii(
+    "0/11 1/6-7 10 13 18-19 38 2/38 50-51 111 127 158 3/16 195 233 250 343 408 412 4/728 1431 1481 2641 5/6926 7693 8699 6/12323 40035 7/4502 101034 149731 8/26741 235973 485643 575802 9/950764 10/3183260 6842090 9124714 11/17751837 33708386 38822783",
+    limits,
+  )
+  moc_oracle_assert(
+    "cells-59",
+    actual,
+    11,
+    [
+      (16777216, 17825792),
+      (18440192, 18444288),
+      (27382784, 27383808),
+      (100663296, 134217728),
+      (159383552, 163577856),
+      (167772160, 184549376),
+      (190840832, 191102976),
+      (201900032, 201916416),
+      (203728640, 203728704),
+      (204472320, 205520896),
+      (209715200, 234881024),
+      (241636352, 241637376),
+      (243395584, 243395840),
+      (244318208, 245366784),
+      (262144000, 263192576),
+      (284029392, 284029408),
+      (301989888, 335544320),
+      (359661568, 360710144),
+      (375128064, 375390208),
+      (388235264, 388497408),
+      (413835264, 413839360),
+      (427819008, 428867584),
+      (432013312, 433061888),
+      (437893760, 437893824),
+      (453902336, 453967872),
+      (465567744, 469762048),
+      (497298432, 497299456),
+      (504168448, 504233984),
+      (532676608, 536870912),
+      (539334176, 539334192),
+      (570097664, 570163200),
+      (583981696, 583981760),
+      (589621248, 589622272),
+      (613298176, 613302272),
+      (621164528, 621164544),
+      (637534208, 654311424),
+      (655933440, 655949824),
+      (662700032, 666894336),
+      (692322304, 692584448),
+      (738197504, 805306368),
+    ],
+    [
+      15, 22, 23, 26, 29, 34, 35, 54, 102, 114, 115, 175, 191, 222, 272, 451, 489,
+      506, 599, 664, 668, 1752, 2455, 2505, 3665, 11022, 11789, 12795, 28707, 56419,
+      70038, 166570, 215267, 288885, 498117, 747787, 837946, 1999340, 7377564, 11036394,
+      13319018, 34529053, 50485602, 55599999,
+    ],
+    "0/11 1/6-7 10 13 18-19 38 2/38 50-51 111 127 158 3/16 195 233 250 343 408 412 4/728 1431 1481 2641 5/6926 7693 8699 6/12323 40035 7/4502 101034 149731 8/26741 235973 485643 575802 9/950764 10/3183260 6842090 9124714 11/17751837 33708386 38822783",
+    "{\"0\":[11],\"1\":[6,7,10,13,18,19,38],\"2\":[38,50,51,111,127,158],\"3\":[16,195,233,250,343,408,412],\"4\":[728,1431,1481,2641],\"5\":[6926,7693,8699],\"6\":[12323,40035],\"7\":[4502,101034,149731],\"8\":[26741,235973,485643,575802],\"9\":[950764],\"10\":[3183260,6842090,9124714],\"11\":[17751837,33708386,38822783]}",
+  )
+}
+
+///|
+test "moc oracle JSON cells-59" {
+  let limits = MocLimits::default()
+  let ascii = Moc::from_ascii(
+    "0/11 1/6-7 10 13 18-19 38 2/38 50-51 111 127 158 3/16 195 233 250 343 408 412 4/728 1431 1481 2641 5/6926 7693 8699 6/12323 40035 7/4502 101034 149731 8/26741 235973 485643 575802 9/950764 10/3183260 6842090 9124714 11/17751837 33708386 38822783",
+    limits,
+  )
+  let json = Moc::from_json(
+    "{\n  \"0\": [11],\n  \"1\": [6, 7, 10, 13, 18, 19, 38],\n  \"2\": [38, 50, 51, 111, 127, 158],\n  \"3\": [16, 195, 233, 250, 343, 408, 412],\n  \"4\": [728, 1431, 1481, 2641],\n  \"5\": [6926, 7693, 8699],\n  \"6\": [12323, 40035],\n  \"7\": [4502, 101034, 149731],\n  \"8\": [26741, 235973, 485643, 575802],\n  \"9\": [950764],\n  \"10\": [3183260, 6842090, 9124714],\n  \"11\": [17751837, 33708386, 38822783]\n}",
+    limits,
+  )
+  assert_true(ascii.equals(json))
+  assert_eq(ascii.max_order(), json.max_order())
+}
+
+///|
+test "moc oracle normalize cells-59" {
+  let limits = MocLimits::default()
+  let cells = [
+    Cell::new(Grid::from_level(10), 6842090),
+    Cell::new(Grid::from_level(5), 6926),
+    Cell::new(Grid::from_level(1), 18),
+    Cell::new(Grid::from_level(1), 10),
+    Cell::new(Grid::from_level(2), 38),
+    Cell::new(Grid::from_level(4), 728),
+    Cell::new(Grid::from_level(10), 9124714),
+    Cell::new(Grid::from_level(8), 575802),
+    Cell::new(Grid::from_level(1), 38),
+    Cell::new(Grid::from_level(3), 731),
+    Cell::new(Grid::from_level(11), 33708386),
+    Cell::new(Grid::from_level(7), 44946),
+    Cell::new(Grid::from_level(2), 127),
+    Cell::new(Grid::from_level(3), 752),
+    Cell::new(Grid::from_level(7), 101034),
+    Cell::new(Grid::from_level(4), 1481),
+    Cell::new(Grid::from_level(3), 16),
+    Cell::new(Grid::from_level(3), 408),
+    Cell::new(Grid::from_level(1), 19),
+    Cell::new(Grid::from_level(10), 3183260),
+    Cell::new(Grid::from_level(9), 950764),
+    Cell::new(Grid::from_level(7), 149731),
+    Cell::new(Grid::from_level(11), 10117144),
+    Cell::new(Grid::from_level(2), 51),
+    Cell::new(Grid::from_level(9), 2940097),
+    Cell::new(Grid::from_level(2), 158),
+    Cell::new(Grid::from_level(3), 250),
+    Cell::new(Grid::from_level(3), 195),
+    Cell::new(Grid::from_level(1), 7),
+    Cell::new(Grid::from_level(5), 8699),
+    Cell::new(Grid::from_level(5), 7693),
+    Cell::new(Grid::from_level(11), 17751837),
+    Cell::new(Grid::from_level(8), 325693),
+    Cell::new(Grid::from_level(2), 111),
+    Cell::new(Grid::from_level(11), 38822783),
+    Cell::new(Grid::from_level(3), 343),
+    Cell::new(Grid::from_level(4), 2998),
+    Cell::new(Grid::from_level(7), 4502),
+    Cell::new(Grid::from_level(3), 233),
+    Cell::new(Grid::from_level(0), 11),
+    Cell::new(Grid::from_level(6), 40035),
+    Cell::new(Grid::from_level(5), 5494),
+    Cell::new(Grid::from_level(3), 412),
+    Cell::new(Grid::from_level(2), 50),
+    Cell::new(Grid::from_level(8), 26741),
+    Cell::new(Grid::from_level(4), 2641),
+    Cell::new(Grid::from_level(6), 12323),
+    Cell::new(Grid::from_level(8), 485643),
+    Cell::new(Grid::from_level(2), 186),
+    Cell::new(Grid::from_level(11), 40117358),
+    Cell::new(Grid::from_level(8), 235973),
+    Cell::new(Grid::from_level(4), 1431),
+    Cell::new(Grid::from_level(5), 1570),
+    Cell::new(Grid::from_level(1), 13),
+    Cell::new(Grid::from_level(1), 6),
+  ]
+  let actual = Moc::from_cells(cells, 11, limits)
+  let expected = Moc::from_ascii(
+    "0/11 1/6-7 10 13 18-19 38 2/38 50-51 111 127 158 3/16 195 233 250 343 408 412 4/728 1431 1481 2641 5/6926 7693 8699 6/12323 40035 7/4502 101034 149731 8/26741 235973 485643 575802 9/950764 10/3183260 6842090 9124714 11/17751837 33708386 38822783",
+    limits,
+  )
+  assert_true(actual.equals(expected))
+  assert_eq(actual.max_order(), expected.max_order())
+}
+
+///|
+test "moc oracle set-00-union" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 13/88083621 119840556 157074544 163437421 280263098 411963111 503472102 506783378 507481972 567473382 572724151 590096884 722549294 743632689 776475676",
+    limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 6/6324 6428 13133 16104 18309 24702 25108 28776 28957 29394 30211 34509 34630 41823 44327 44883",
+    limits,
+  )
+  let actual = a.union(b, limits)
+  moc_oracle_assert(
+    "set-00-union",
+    actual,
+    13,
+    [
+      (0, 67108864),
+      (88083621, 88083622),
+      (103612416, 103628800),
+      (105316352, 105332736),
+      (119840556, 119840557),
+      (157074544, 157074545),
+      (163437421, 163437422),
+      (215171072, 215187456),
+      (263847936, 263864320),
+      (280263098, 280263099),
+      (299974656, 299991040),
+      (404717568, 404733952),
+      (411369472, 411385856),
+      (411963111, 411963112),
+      (471465984, 471482368),
+      (474431488, 474447872),
+      (481591296, 481607680),
+      (494977024, 494993408),
+      (503472102, 503472103),
+      (506783378, 506783379),
+      (507481972, 507481973),
+      (565395456, 565411840),
+      (567377920, 567394304),
+      (567473382, 567473383),
+      (572724151, 572724152),
+      (590096884, 590096885),
+      (685228032, 685244416),
+      (722549294, 722549295),
+      (726253568, 726269952),
+      (735363072, 735379456),
+      (743632689, 743632690),
+      (776475676, 776475677),
+    ],
+    [
+      4, 22708, 22812, 29517, 32488, 34693, 41086, 41492, 45160, 45341, 45778, 46595,
+      50893, 51014, 58207, 60711, 61267, 356519077, 388276012, 425510000, 431872877,
+      548698554, 680398567, 771907558, 775218834, 775917428, 835908838, 841159607,
+      858532340, 990984750, 1012068145, 1044911132,
+    ],
+    "0/0 6/6324 6428 13133 16104 18309 24702 25108 28776 28957 29394 30211 34509 34630 41823 44327 44883 13/88083621 119840556 157074544 163437421 280263098 411963111 503472102 506783378 507481972 567473382 572724151 590096884 722549294 743632689 776475676",
+    "{\"0\":[0],\"6\":[6324,6428,13133,16104,18309,24702,25108,28776,28957,29394,30211,34509,34630,41823,44327,44883],\"13\":[88083621,119840556,157074544,163437421,280263098,411963111,503472102,506783378,507481972,567473382,572724151,590096884,722549294,743632689,776475676]}",
+  )
+}
+
+///|
+test "moc oracle set-00-intersection" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 13/88083621 119840556 157074544 163437421 280263098 411963111 503472102 506783378 507481972 567473382 572724151 590096884 722549294 743632689 776475676",
+    limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 6/6324 6428 13133 16104 18309 24702 25108 28776 28957 29394 30211 34509 34630 41823 44327 44883",
+    limits,
+  )
+  let actual = a.intersection(b, limits)
+  moc_oracle_assert(
+    "set-00-intersection",
+    actual,
+    13,
+    [(0, 33554432)],
+    [16, 17],
+    "1/0-1 13/",
+    "{\"1\":[0,1],\"13\":[]}",
+  )
+}
+
+///|
+test "moc oracle set-00-difference" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 13/88083621 119840556 157074544 163437421 280263098 411963111 503472102 506783378 507481972 567473382 572724151 590096884 722549294 743632689 776475676",
+    limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 6/6324 6428 13133 16104 18309 24702 25108 28776 28957 29394 30211 34509 34630 41823 44327 44883",
+    limits,
+  )
+  let actual = a.difference(b, limits)
+  moc_oracle_assert(
+    "set-00-difference",
+    actual,
+    13,
+    [
+      (33554432, 67108864),
+      (88083621, 88083622),
+      (119840556, 119840557),
+      (157074544, 157074545),
+      (163437421, 163437422),
+      (280263098, 280263099),
+      (411963111, 411963112),
+      (503472102, 503472103),
+      (506783378, 506783379),
+      (507481972, 507481973),
+      (567473382, 567473383),
+      (572724151, 572724152),
+      (590096884, 590096885),
+      (722549294, 722549295),
+      (743632689, 743632690),
+      (776475676, 776475677),
+    ],
+    [
+      18, 19, 356519077, 388276012, 425510000, 431872877, 548698554, 680398567, 771907558,
+      775218834, 775917428, 835908838, 841159607, 858532340, 990984750, 1012068145,
+      1044911132,
+    ],
+    "1/2-3 13/88083621 119840556 157074544 163437421 280263098 411963111 503472102 506783378 507481972 567473382 572724151 590096884 722549294 743632689 776475676",
+    "{\"1\":[2,3],\"13\":[88083621,119840556,157074544,163437421,280263098,411963111,503472102,506783378,507481972,567473382,572724151,590096884,722549294,743632689,776475676]}",
+  )
+}
+
+///|
+test "moc oracle set-00-complement" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 13/88083621 119840556 157074544 163437421 280263098 411963111 503472102 506783378 507481972 567473382 572724151 590096884 722549294 743632689 776475676",
+    limits,
+  )
+  let actual = a.complement(limits)
+  moc_oracle_assert(
+    "set-00-complement",
+    actual,
+    13,
+    [
+      (67108864, 88083621),
+      (88083622, 119840556),
+      (119840557, 157074544),
+      (157074545, 163437421),
+      (163437422, 280263098),
+      (280263099, 411963111),
+      (411963112, 503472102),
+      (503472103, 506783378),
+      (506783379, 507481972),
+      (507481973, 567473382),
+      (567473383, 572724151),
+      (572724152, 590096884),
+      (590096885, 722549294),
+      (722549295, 743632689),
+      (743632690, 776475676),
+      (776475677, 805306368),
+    ],
+    [
+      7, 9, 13, 20, 22, 24, 26, 27, 33, 34, 35, 41, 42, 43, 44, 45, 47, 48, 56, 57,
+      58, 61, 63, 84, 86, 87, 93, 94, 95, 100, 103, 128, 129, 131, 160, 161, 163,
+      185, 186, 187, 196, 197, 198, 201, 202, 203, 205, 206, 207, 237, 238, 239,
+      240, 242, 243, 248, 250, 251, 341, 342, 343, 368, 369, 371, 404, 406, 407,
+      408, 409, 410, 520, 521, 522, 649, 650, 651, 737, 738, 796, 798, 799, 800,
+      801, 803, 816, 817, 819, 944, 946, 947, 964, 966, 967, 997, 998, 999, 1361,
+      1362, 1363, 1480, 1482, 1483, 1620, 1621, 1622, 1644, 1645, 1646, 2092, 2094,
+      2095, 2592, 2593, 2594, 2945, 2946, 2947, 2956, 2958, 3189, 3190, 3191, 3209,
+      3210, 3211, 3272, 3273, 3274, 3781, 3782, 3783, 3861, 3862, 3863, 3984, 3985,
+      3987, 5441, 5442, 5443, 5925, 5926, 5927, 6493, 6494, 6495, 6588, 6590, 6591,
+      8373, 8374, 8375, 10380, 10381, 10383, 11776, 11777, 11779, 11829, 11830, 11831,
+      11836, 11837, 11838, 12752, 12753, 12755, 12832, 12833, 12834, 13101, 13102,
+      13103, 15120, 15122, 15123, 15440, 15441, 15443, 15945, 15946, 15947, 21761,
+      21762, 21763, 23696, 23697, 23699, 25968, 25969, 25970, 26356, 26357, 26358,
+      33488, 33490, 33491, 41529, 41530, 41531, 47112, 47114, 47115, 47312, 47313,
+      47314, 47356, 47357, 47359, 51016, 51017, 51018, 51341, 51342, 51343, 52401,
+      52402, 52403, 60485, 60486, 60487, 61768, 61769, 61770, 63777, 63778, 63779,
+      87041, 87042, 87043, 94792, 94794, 94795, 103885, 103886, 103887, 105436, 105438,
+      105439, 133956, 133957, 133958, 166113, 166114, 166115, 188452, 188454, 188455,
+      189260, 189261, 189263, 189433, 189434, 189435, 204076, 204077, 204078, 205360,
+      205362, 205363, 209600, 209601, 209603, 241936, 241937, 241938, 247084, 247085,
+      247087, 255104, 255106, 255107, 348160, 348161, 348162, 379172, 379173, 379174,
+      415536, 415538, 415539, 421748, 421749, 421751, 535836, 535837, 535839, 664448,
+      664449, 664450, 753812, 753813, 753814, 757048, 757050, 757051, 757728, 757729,
+      757730, 816316, 816318, 816319, 821445, 821446, 821447, 838408, 838409, 838411,
+      967756, 967757, 967759, 988344, 988345, 988346, 1020420, 1020422, 1020423,
+      1392653, 1392654, 1392655, 1516700, 1516701, 1516702, 1662149, 1662150, 1662151,
+      1687000, 1687001, 1687002, 2143352, 2143354, 2143355, 2657804, 2657805, 2657807,
+      3015260, 3015261, 3015262, 3028196, 3028197, 3028199, 3030924, 3030925, 3030926,
+      3265269, 3265270, 3265271, 3285776, 3285777, 3285778, 3353640, 3353642, 3353643,
+      3871032, 3871033, 3871035, 3953388, 3953389, 3953390, 4081685, 4081686, 4081687,
+      5570608, 5570609, 5570611, 6066813, 6066814, 6066815, 6648592, 6648594, 6648595,
+      6748012, 6748014, 6748015, 8573412, 8573413, 8573415, 10631224, 10631225, 10631226,
+      12061052, 12061053, 12061054, 12112792, 12112793, 12112795, 12123708, 12123710,
+      12123711, 13061072, 13061073, 13061074, 13143116, 13143117, 13143119, 13414564,
+      13414565, 13414566, 15484137, 15484138, 15484139, 15813565, 15813566, 15813567,
+      16326737, 16326738, 16326739, 22282440, 22282441, 22282443, 24267248, 24267249,
+      24267251, 26594372, 26594373, 26594374, 26992052, 26992053, 26992055, 34293656,
+      34293657, 34293658, 42524908, 42524909, 42524911, 48244220, 48244221, 48244223,
+      48451176, 48451178, 48451179, 48494836, 48494837, 48494838, 52244300, 52244301,
+      52244303, 52572472, 52572473, 52572474, 53658268, 53658269, 53658270, 61936544,
+      61936545, 61936547, 63254256, 63254257, 63254258, 65306944, 65306946, 65306947,
+      89129768, 89129770, 89129771, 97069000, 97069001, 97069002, 106377501, 106377502,
+      106377503, 107968216, 107968217, 107968218, 137174636, 137174637, 137174639,
+      170099640, 170099642, 170099643, 192976888, 192976890, 192976891, 193804709,
+      193804710, 193804711, 193979356, 193979358, 193979359, 208977208, 208977210,
+      208977211, 210289900, 210289902, 210289903, 214633084, 214633086, 214633087,
+      247746184, 247746185, 247746186, 253017037, 253017038, 253017039, 261227780,
+      261227781, 261227782, 356519076, 356519078, 356519079, 388276013, 388276014,
+      388276015, 425510001, 425510002, 425510003, 431872876, 431872878, 431872879,
+      548698552, 548698553, 548698555, 680398564, 680398565, 680398566, 771907556,
+      771907557, 771907559, 775218832, 775218833, 775218835, 775917429, 775917430,
+      775917431, 835908836, 835908837, 835908839, 841159604, 841159605, 841159606,
+      858532341, 858532342, 858532343, 990984748, 990984749, 990984751, 1012068144,
+      1012068146, 1012068147, 1044911133, 1044911134, 1044911135,
+    ],
+    "0/3 5 9 1/4 6 8 10-11 17-19 25-29 31-32 40-42 45 47 2/20 22-23 29-31 36 39 64-65 67 96-97 99 121-123 132-134 137-139 141-143 173-176 178-179 184 186-187 3/85-87 112-113 115 148 150-154 264-266 393-395 481-482 540 542-545 547 560-561 563 688 690-691 708 710-711 741-743 4/337-339 456 458-459 596-598 620-622 1068 1070-1071 1568-1570 1921-1923 1932 1934 2165-2167 2185-2187 2248-2250 2757-2759 2837-2839 2960-2961 2963 5/1345-1347 1829-1831 2397-2399 2492 2494-2495 4277-4279 6284-6285 6287 7680-7681 7683 7733-7735 7740-7742 8656-8657 8659 8736-8738 9005-9007 11024 11026-11027 11344-11345 11347 11849-11851 6/5377-5379 7312-7313 7315 9584-9586 9972-9974 17104 17106-17107 25145-25147 30728 30730-30731 30928-30930 30972-30973 30975 34632-34634 34957-34959 36017-36019 44101-44103 45384-45386 47393-47395 7/21505-21507 29256 29258-29259 38349-38351 39900 39902-39903 68420-68422 100577-100579 122916 122918-122919 123724-123725 123727 123897-123899 138540-138542 139824 139826-139827 144064-144065 144067 176400-176402 181548-181549 181551 189568 189570-189571 8/86016-86018 117028-117030 153392 153394-153395 159604-159605 159607 273692-273693 273695 402304-402306 491668-491670 494904 494906-494907 495584-495586 554172 554174-554175 559301-559303 576264-576265 576267 705612-705613 705615 726200-726202 758276 758278-758279 9/344077-344079 468124-468126 613573-613575 638424-638426 1094776 1094778-1094779 1609228-1609229 1609231 1966684-1966686 1979620-1979621 1979623 1982348-1982350 2216693-2216695 2237200-2237202 2305064 2305066-2305067 2822456-2822457 2822459 2904812-2904814 3033109-3033111 10/1376304-1376305 1376307 1872509-1872511 2454288 2454290-2454291 2553708 2553710-2553711 4379108-4379109 4379111 6436920-6436922 7866748-7866750 7918488-7918489 7918491 7929404 7929406-7929407 8866768-8866770 8948812-8948813 8948815 9220260-9220262 11289833-11289835 11619261-11619263 12132433-12132435 11/5505224-5505225 5505227 7490032-7490033 7490035 9817156-9817158 10214836-10214837 10214839 17516440-17516442 25747692-25747693 25747695 31467004-31467005 31467007 31673960 31673962-31673963 31717620-31717622 35467084-35467085 35467087 35795256-35795258 36881052-36881054 45159328-45159329 45159331 46477040-46477042 48529728 48529730-48529731 12/22020904 22020906-22020907 29960136-29960138 39268637-39268639 40859352-40859354 70065772-70065773 70065775 102990776 102990778-102990779 125868024 125868026-125868027 126695845-126695847 126870492 126870494-126870495 141868344 141868346-141868347 143181036 143181038-143181039 147524220 147524222-147524223 180637320-180637322 185908173-185908175 194118916-194118918 13/88083620 88083622-88083623 119840557-119840559 157074545-157074547 163437420 163437422-163437423 280263096-280263097 280263099 411963108-411963110 503472100-503472101 503472103 506783376-506783377 506783379 507481973-507481975 567473380-567473381 567473383 572724148-572724150 590096885-590096887 722549292-722549293 722549295 743632688 743632690-743632691 776475677-776475679",
+    "{\"0\":[3,5,9],\"1\":[4,6,8,10,11,17,18,19,25,26,27,28,29,31,32,40,41,42,45,47],\"2\":[20,22,23,29,30,31,36,39,64,65,67,96,97,99,121,122,123,132,133,134,137,138,139,141,142,143,173,174,175,176,178,179,184,186,187],\"3\":[85,86,87,112,113,115,148,150,151,152,153,154,264,265,266,393,394,395,481,482,540,542,543,544,545,547,560,561,563,688,690,691,708,710,711,741,742,743],\"4\":[337,338,339,456,458,459,596,597,598,620,621,622,1068,1070,1071,1568,1569,1570,1921,1922,1923,1932,1934,2165,2166,2167,2185,2186,2187,2248,2249,2250,2757,2758,2759,2837,2838,2839,2960,2961,2963],\"5\":[1345,1346,1347,1829,1830,1831,2397,2398,2399,2492,2494,2495,4277,4278,4279,6284,6285,6287,7680,7681,7683,7733,7734,7735,7740,7741,7742,8656,8657,8659,8736,8737,8738,9005,9006,9007,11024,11026,11027,11344,11345,11347,11849,11850,11851],\"6\":[5377,5378,5379,7312,7313,7315,9584,9585,9586,9972,9973,9974,17104,17106,17107,25145,25146,25147,30728,30730,30731,30928,30929,30930,30972,30973,30975,34632,34633,34634,34957,34958,34959,36017,36018,36019,44101,44102,44103,45384,45385,45386,47393,47394,47395],\"7\":[21505,21506,21507,29256,29258,29259,38349,38350,38351,39900,39902,39903,68420,68421,68422,100577,100578,100579,122916,122918,122919,123724,123725,123727,123897,123898,123899,138540,138541,138542,139824,139826,139827,144064,144065,144067,176400,176401,176402,181548,181549,181551,189568,189570,189571],\"8\":[86016,86017,86018,117028,117029,117030,153392,153394,153395,159604,159605,159607,273692,273693,273695,402304,402305,402306,491668,491669,491670,494904,494906,494907,495584,495585,495586,554172,554174,554175,559301,559302,559303,576264,576265,576267,705612,705613,705615,726200,726201,726202,758276,758278,758279],\"9\":[344077,344078,344079,468124,468125,468126,613573,613574,613575,638424,638425,638426,1094776,1094778,1094779,1609228,1609229,1609231,1966684,1966685,1966686,1979620,1979621,1979623,1982348,1982349,1982350,2216693,2216694,2216695,2237200,2237201,2237202,2305064,2305066,2305067,2822456,2822457,2822459,2904812,2904813,2904814,3033109,3033110,3033111],\"10\":[1376304,1376305,1376307,1872509,1872510,1872511,2454288,2454290,2454291,2553708,2553710,2553711,4379108,4379109,4379111,6436920,6436921,6436922,7866748,7866749,7866750,7918488,7918489,7918491,7929404,7929406,7929407,8866768,8866769,8866770,8948812,8948813,8948815,9220260,9220261,9220262,11289833,11289834,11289835,11619261,11619262,11619263,12132433,12132434,12132435],\"11\":[5505224,5505225,5505227,7490032,7490033,7490035,9817156,9817157,9817158,10214836,10214837,10214839,17516440,17516441,17516442,25747692,25747693,25747695,31467004,31467005,31467007,31673960,31673962,31673963,31717620,31717621,31717622,35467084,35467085,35467087,35795256,35795257,35795258,36881052,36881053,36881054,45159328,45159329,45159331,46477040,46477041,46477042,48529728,48529730,48529731],\"12\":[22020904,22020906,22020907,29960136,29960137,29960138,39268637,39268638,39268639,40859352,40859353,40859354,70065772,70065773,70065775,102990776,102990778,102990779,125868024,125868026,125868027,126695845,126695846,126695847,126870492,126870494,126870495,141868344,141868346,141868347,143181036,143181038,143181039,147524220,147524222,147524223,180637320,180637321,180637322,185908173,185908174,185908175,194118916,194118917,194118918],\"13\":[88083620,88083622,88083623,119840557,119840558,119840559,157074545,157074546,157074547,163437420,163437422,163437423,280263096,280263097,280263099,411963108,411963109,411963110,503472100,503472101,503472103,506783376,506783377,506783379,507481973,507481974,507481975,567473380,567473381,567473383,572724148,572724149,572724150,590096885,590096886,590096887,722549292,722549293,722549295,743632688,743632690,743632691,776475677,776475678,776475679]}",
+  )
+}
+
+///|
+test "moc oracle set-01-union" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 12/20033454 25193580 28839248 31997922 32774390 35880292 41237139 58276626 95778607 105171977 113759210 133371025 159433178 184777637 197314597",
+    limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 10/1592517 1853236 4354872 5537821 5721599 6681566 7064596 8732874 9666275 9863988 10999696 11318352 11347954 11446076 11920369",
+    limits,
+  )
+  let actual = a.union(b, limits)
+  moc_oracle_assert(
+    "set-01-union",
+    actual,
+    12,
+    [
+      (0, 67108864),
+      (80133816, 80133820),
+      (100774320, 100774324),
+      (101921088, 101921152),
+      (115356992, 115356996),
+      (118607104, 118607168),
+      (127991688, 127991692),
+      (131097560, 131097564),
+      (143521168, 143521172),
+      (164948556, 164948560),
+      (233106504, 233106508),
+      (278711808, 278711872),
+      (354420544, 354420608),
+      (366182336, 366182400),
+      (383114428, 383114432),
+      (420687908, 420687912),
+      (427620224, 427620288),
+      (452134144, 452134208),
+      (455036840, 455036844),
+      (533484100, 533484104),
+      (558903936, 558904000),
+      (618641600, 618641664),
+      (631295232, 631295296),
+      (637732712, 637732716),
+      (703980544, 703980608),
+      (724374528, 724374592),
+      (726269056, 726269120),
+      (732548864, 732548928),
+      (739110548, 739110552),
+      (762903616, 762903680),
+      (789258388, 789258392),
+    ],
+    [
+      4, 5786821, 6047540, 8549176, 9732125, 9915903, 10875870, 11258900, 12927178,
+      13860579, 14058292, 15194000, 15512656, 15542258, 15640380, 16114673, 87142318,
+      92302444, 95948112, 99106786, 99883254, 102989156, 108346003, 125385490, 162887471,
+      172280841, 180868074, 200479889, 226542042, 251886501, 264423461,
+    ],
+    "0/0 10/1592517 1853236 4354872 5537821 5721599 6681566 7064596 8732874 9666275 9863988 10999696 11318352 11347954 11446076 11920369 12/20033454 25193580 28839248 31997922 32774390 35880292 41237139 58276626 95778607 105171977 113759210 133371025 159433178 184777637 197314597",
+    "{\"0\":[0],\"10\":[1592517,1853236,4354872,5537821,5721599,6681566,7064596,8732874,9666275,9863988,10999696,11318352,11347954,11446076,11920369],\"12\":[20033454,25193580,28839248,31997922,32774390,35880292,41237139,58276626,95778607,105171977,113759210,133371025,159433178,184777637,197314597]}",
+  )
+}
+
+///|
+test "moc oracle set-01-intersection" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 12/20033454 25193580 28839248 31997922 32774390 35880292 41237139 58276626 95778607 105171977 113759210 133371025 159433178 184777637 197314597",
+    limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 10/1592517 1853236 4354872 5537821 5721599 6681566 7064596 8732874 9666275 9863988 10999696 11318352 11347954 11446076 11920369",
+    limits,
+  )
+  let actual = a.intersection(b, limits)
+  moc_oracle_assert(
+    "set-01-intersection",
+    actual,
+    12,
+    [(0, 33554432)],
+    [16, 17],
+    "1/0-1 12/",
+    "{\"1\":[0,1],\"12\":[]}",
+  )
+}
+
+///|
+test "moc oracle set-01-difference" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 12/20033454 25193580 28839248 31997922 32774390 35880292 41237139 58276626 95778607 105171977 113759210 133371025 159433178 184777637 197314597",
+    limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 10/1592517 1853236 4354872 5537821 5721599 6681566 7064596 8732874 9666275 9863988 10999696 11318352 11347954 11446076 11920369",
+    limits,
+  )
+  let actual = a.difference(b, limits)
+  moc_oracle_assert(
+    "set-01-difference",
+    actual,
+    12,
+    [
+      (33554432, 67108864),
+      (80133816, 80133820),
+      (100774320, 100774324),
+      (115356992, 115356996),
+      (127991688, 127991692),
+      (131097560, 131097564),
+      (143521168, 143521172),
+      (164948556, 164948560),
+      (233106504, 233106508),
+      (383114428, 383114432),
+      (420687908, 420687912),
+      (455036840, 455036844),
+      (533484100, 533484104),
+      (637732712, 637732716),
+      (739110548, 739110552),
+      (789258388, 789258392),
+    ],
+    [
+      18, 19, 87142318, 92302444, 95948112, 99106786, 99883254, 102989156, 108346003,
+      125385490, 162887471, 172280841, 180868074, 200479889, 226542042, 251886501,
+      264423461,
+    ],
+    "1/2-3 12/20033454 25193580 28839248 31997922 32774390 35880292 41237139 58276626 95778607 105171977 113759210 133371025 159433178 184777637 197314597",
+    "{\"1\":[2,3],\"12\":[20033454,25193580,28839248,31997922,32774390,35880292,41237139,58276626,95778607,105171977,113759210,133371025,159433178,184777637,197314597]}",
+  )
+}
+
+///|
+test "moc oracle set-01-complement" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 12/20033454 25193580 28839248 31997922 32774390 35880292 41237139 58276626 95778607 105171977 113759210 133371025 159433178 184777637 197314597",
+    limits,
+  )
+  let actual = a.complement(limits)
+  moc_oracle_assert(
+    "set-01-complement",
+    actual,
+    12,
+    [
+      (67108864, 80133816),
+      (80133820, 100774320),
+      (100774324, 115356992),
+      (115356996, 127991688),
+      (127991692, 131097560),
+      (131097564, 143521168),
+      (143521172, 164948556),
+      (164948560, 233106504),
+      (233106508, 383114428),
+      (383114432, 420687908),
+      (420687912, 455036840),
+      (455036844, 533484100),
+      (533484104, 637732712),
+      (637732716, 739110548),
+      (739110552, 789258388),
+      (789258392, 805306368),
+    ],
+    [
+      8, 12, 14, 21, 26, 27, 28, 30, 31, 36, 37, 39, 40, 42, 44, 45, 46, 52, 53,
+      55, 61, 62, 80, 81, 82, 89, 90, 92, 93, 96, 97, 99, 100, 101, 102, 116, 117,
+      118, 152, 153, 154, 165, 166, 167, 173, 174, 175, 188, 189, 190, 217, 218,
+      219, 241, 242, 243, 253, 254, 255, 333, 334, 335, 353, 354, 355, 364, 365,
+      367, 376, 377, 379, 380, 382, 383, 393, 394, 395, 412, 414, 415, 476, 477,
+      479, 620, 622, 623, 656, 658, 659, 688, 690, 691, 765, 766, 767, 865, 866,
+      867, 961, 962, 963, 1009, 1010, 1011, 1328, 1330, 1331, 1409, 1410, 1411, 1465,
+      1466, 1467, 1513, 1514, 1515, 1525, 1526, 1527, 1568, 1569, 1570, 1652, 1654,
+      1655, 1912, 1914, 1915, 2484, 2486, 2487, 2629, 2630, 2631, 2756, 2757, 2758,
+      3056, 3057, 3058, 3457, 3458, 3459, 3840, 3841, 3842, 4032, 4033, 4035, 5316,
+      5317, 5319, 5632, 5634, 5635, 5857, 5858, 5859, 6049, 6050, 6051, 6097, 6098,
+      6099, 6284, 6286, 6287, 6613, 6614, 6615, 7653, 7654, 7655, 9940, 9942, 9943,
+      10512, 10513, 10514, 11036, 11037, 11038, 12237, 12238, 12239, 13824, 13825,
+      13826, 15372, 15374, 15375, 16136, 16137, 16138, 21272, 21273, 21275, 22532,
+      22533, 22535, 23425, 23426, 23427, 24192, 24193, 24194, 24384, 24386, 24387,
+      25140, 25141, 25142, 26448, 26449, 26450, 30608, 30609, 30610, 39764, 39765,
+      39766, 42061, 42062, 42063, 44156, 44158, 44159, 48944, 48946, 48947, 55309,
+      55310, 55311, 61492, 61493, 61494, 64557, 64558, 64559, 85096, 85097, 85098,
+      90136, 90137, 90138, 93696, 93697, 93698, 96780, 96781, 96782, 97540, 97541,
+      97543, 100572, 100573, 100574, 105804, 105805, 105807, 122444, 122445, 122447,
+      159068, 159070, 159071, 168240, 168241, 168242, 176629, 176630, 176631, 195780,
+      195782, 195783, 221233, 221234, 221235, 245980, 245981, 245983, 258224, 258225,
+      258227, 340396, 340397, 340398, 360557, 360558, 360559, 374796, 374798, 374799,
+      387132, 387133, 387134, 390169, 390170, 390171, 402300, 402302, 402303, 423224,
+      423225, 423227, 489784, 489785, 489786, 636276, 636277, 636278, 672973, 672974,
+      672975, 706512, 706513, 706514, 783125, 783126, 783127, 884928, 884930, 884931,
+      983928, 983929, 983930, 1032905, 1032906, 1032907, 1361596, 1361597, 1361599,
+      1442224, 1442226, 1442227, 1499188, 1499190, 1499191, 1548540, 1548541, 1548542,
+      1560672, 1560673, 1560674, 1609204, 1609206, 1609207, 1692904, 1692905, 1692907,
+      1959149, 1959150, 1959151, 2545117, 2545118, 2545119, 2691889, 2691890, 2691891,
+      2826060, 2826061, 2826062, 3132496, 3132497, 3132499, 3539716, 3539717, 3539718,
+      3935724, 3935725, 3935727, 4131617, 4131618, 4131619, 5446392, 5446393, 5446395,
+      5768900, 5768901, 5768903, 5996756, 5996758, 5996759, 6194172, 6194173, 6194175,
+      6242700, 6242701, 6242702, 6436820, 6436821, 6436823, 6771624, 6771626, 6771627,
+      7836592, 7836594, 7836595, 10180464, 10180465, 10180467, 10767553, 10767554,
+      10767555, 11304252, 11304253, 11304255, 12529992, 12529994, 12529995, 14158876,
+      14158878, 14158879, 15742904, 15742905, 15742907, 16526464, 16526465, 16526467,
+      21785576, 21785577, 21785578, 23075608, 23075609, 23075610, 23987029, 23987030,
+      23987031, 24776697, 24776698, 24776699, 24970812, 24970814, 24970815, 25747288,
+      25747290, 25747291, 27086501, 27086502, 27086503, 31346373, 31346374, 31346375,
+      40721864, 40721865, 40721866, 43070208, 43070209, 43070211, 45217016, 45217017,
+      45217019, 50119973, 50119974, 50119975, 56635508, 56635509, 56635511, 62971624,
+      62971626, 62971627, 66105864, 66105866, 66105867, 87142316, 87142317, 87142319,
+      92302445, 92302446, 92302447, 95948113, 95948114, 95948115, 99106784, 99106785,
+      99106787, 99883252, 99883253, 99883255, 102989157, 102989158, 102989159, 108346000,
+      108346001, 108346002, 125385488, 125385489, 125385491, 162887468, 162887469,
+      162887470, 172280840, 172280842, 172280843, 180868072, 180868073, 180868075,
+      200479888, 200479890, 200479891, 226542040, 226542041, 226542043, 251886500,
+      251886502, 251886503, 264423460, 264423462, 264423463,
+    ],
+    "0/4 8 10 1/5 10-12 14-15 20-21 23-24 26 28-30 36-37 39 45-46 2/16-18 25-26 28-29 32-33 35-38 52-54 88-90 101-103 109-111 124-126 153-155 177-179 189-191 3/77-79 97-99 108-109 111 120-121 123-124 126-127 137-139 156 158-159 220-221 223 364 366-367 400 402-403 432 434-435 509-511 609-611 705-707 753-755 4/304 306-307 385-387 441-443 489-491 501-503 544-546 628 630-631 888 890-891 1460 1462-1463 1605-1607 1732-1734 2032-2034 2433-2435 2816-2818 3008-3009 3011 5/1220-1221 1223 1536 1538-1539 1761-1763 1953-1955 2001-2003 2188 2190-2191 2517-2519 3557-3559 5844 5846-5847 6416-6418 6940-6942 8141-8143 9728-9730 11276 11278-11279 12040-12042 6/4888-4889 4891 6148-6149 6151 7041-7043 7808-7810 8000 8002-8003 8756-8758 10064-10066 14224-14226 23380-23382 25677-25679 27772 27774-27775 32560 32562-32563 38925-38927 45108-45110 48173-48175 7/19560-19562 24600-24602 28160-28162 31244-31246 32004-32005 32007 35036-35038 40268-40269 40271 56908-56909 56911 93532 93534-93535 102704-102706 111093-111095 130244 130246-130247 155697-155699 180444-180445 180447 192688-192689 192691 8/78252-78254 98413-98415 112652 112654-112655 124988-124990 128025-128027 140156 140158-140159 161080-161081 161083 227640-227642 374132-374134 410829-410831 444368-444370 520981-520983 622784 622786-622787 721784-721786 770761-770763 9/313020-313021 313023 393648 393650-393651 450612 450614-450615 499964-499966 512096-512098 560628 560630-560631 644328-644329 644331 910573-910575 1496541-1496543 1643313-1643315 1777484-1777486 2083920-2083921 2083923 2491140-2491142 2887148-2887149 2887151 3083041-3083043 10/1252088-1252089 1252091 1574596-1574597 1574599 1802452 1802454-1802455 1999868-1999869 1999871 2048396-2048398 2242516-2242517 2242519 2577320 2577322-2577323 3642288 3642290-3642291 5986160-5986161 5986163 6573249-6573251 7109948-7109949 7109951 8335688 8335690-8335691 9964572 9964574-9964575 11548600-11548601 11548603 12332160-12332161 12332163 11/5008360-5008362 6298392-6298394 7209813-7209815 7999481-7999483 8193596 8193598-8193599 8970072 8970074-8970075 10309285-10309287 14569157-14569159 23944648-23944650 26292992-26292993 26292995 28439800-28439801 28439803 33342757-33342759 39858292-39858293 39858295 46194408 46194410-46194411 49328648 49328650-49328651 12/20033452-20033453 20033455 25193581-25193583 28839249-28839251 31997920-31997921 31997923 32774388-32774389 32774391 35880293-35880295 41237136-41237138 58276624-58276625 58276627 95778604-95778606 105171976 105171978-105171979 113759208-113759209 113759211 133371024 133371026-133371027 159433176-159433177 159433179 184777636 184777638-184777639 197314596 197314598-197314599",
+    "{\"0\":[4,8,10],\"1\":[5,10,11,12,14,15,20,21,23,24,26,28,29,30,36,37,39,45,46],\"2\":[16,17,18,25,26,28,29,32,33,35,36,37,38,52,53,54,88,89,90,101,102,103,109,110,111,124,125,126,153,154,155,177,178,179,189,190,191],\"3\":[77,78,79,97,98,99,108,109,111,120,121,123,124,126,127,137,138,139,156,158,159,220,221,223,364,366,367,400,402,403,432,434,435,509,510,511,609,610,611,705,706,707,753,754,755],\"4\":[304,306,307,385,386,387,441,442,443,489,490,491,501,502,503,544,545,546,628,630,631,888,890,891,1460,1462,1463,1605,1606,1607,1732,1733,1734,2032,2033,2034,2433,2434,2435,2816,2817,2818,3008,3009,3011],\"5\":[1220,1221,1223,1536,1538,1539,1761,1762,1763,1953,1954,1955,2001,2002,2003,2188,2190,2191,2517,2518,2519,3557,3558,3559,5844,5846,5847,6416,6417,6418,6940,6941,6942,8141,8142,8143,9728,9729,9730,11276,11278,11279,12040,12041,12042],\"6\":[4888,4889,4891,6148,6149,6151,7041,7042,7043,7808,7809,7810,8000,8002,8003,8756,8757,8758,10064,10065,10066,14224,14225,14226,23380,23381,23382,25677,25678,25679,27772,27774,27775,32560,32562,32563,38925,38926,38927,45108,45109,45110,48173,48174,48175],\"7\":[19560,19561,19562,24600,24601,24602,28160,28161,28162,31244,31245,31246,32004,32005,32007,35036,35037,35038,40268,40269,40271,56908,56909,56911,93532,93534,93535,102704,102705,102706,111093,111094,111095,130244,130246,130247,155697,155698,155699,180444,180445,180447,192688,192689,192691],\"8\":[78252,78253,78254,98413,98414,98415,112652,112654,112655,124988,124989,124990,128025,128026,128027,140156,140158,140159,161080,161081,161083,227640,227641,227642,374132,374133,374134,410829,410830,410831,444368,444369,444370,520981,520982,520983,622784,622786,622787,721784,721785,721786,770761,770762,770763],\"9\":[313020,313021,313023,393648,393650,393651,450612,450614,450615,499964,499965,499966,512096,512097,512098,560628,560630,560631,644328,644329,644331,910573,910574,910575,1496541,1496542,1496543,1643313,1643314,1643315,1777484,1777485,1777486,2083920,2083921,2083923,2491140,2491141,2491142,2887148,2887149,2887151,3083041,3083042,3083043],\"10\":[1252088,1252089,1252091,1574596,1574597,1574599,1802452,1802454,1802455,1999868,1999869,1999871,2048396,2048397,2048398,2242516,2242517,2242519,2577320,2577322,2577323,3642288,3642290,3642291,5986160,5986161,5986163,6573249,6573250,6573251,7109948,7109949,7109951,8335688,8335690,8335691,9964572,9964574,9964575,11548600,11548601,11548603,12332160,12332161,12332163],\"11\":[5008360,5008361,5008362,6298392,6298393,6298394,7209813,7209814,7209815,7999481,7999482,7999483,8193596,8193598,8193599,8970072,8970074,8970075,10309285,10309286,10309287,14569157,14569158,14569159,23944648,23944649,23944650,26292992,26292993,26292995,28439800,28439801,28439803,33342757,33342758,33342759,39858292,39858293,39858295,46194408,46194410,46194411,49328648,49328650,49328651],\"12\":[20033452,20033453,20033455,25193581,25193582,25193583,28839249,28839250,28839251,31997920,31997921,31997923,32774388,32774389,32774391,35880293,35880294,35880295,41237136,41237137,41237138,58276624,58276625,58276627,95778604,95778605,95778606,105171976,105171978,105171979,113759208,113759209,113759211,133371024,133371026,133371027,159433176,159433177,159433179,184777636,184777638,184777639,197314596,197314598,197314599]}",
+  )
+}
+
+///|
+test "moc oracle set-02-union" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 12/18476695 32320344 36411967 36920464 46045078 59101575 71971779 115327431 121687335 128290662 135491594",
+    limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 7/16852 19621 19941 20115 45498 70531 99731 101854 108991 115519 134988 150013 150488 159105 195516",
+    limits,
+  )
+  let actual = a.union(b, limits)
+  moc_oracle_assert(
+    "set-02-union",
+    actual,
+    12,
+    [
+      (0, 67108864),
+      (69025792, 69029888),
+      (73906780, 73906784),
+      (80367616, 80371712),
+      (81678336, 81682432),
+      (82391040, 82395136),
+      (129281376, 129281380),
+      (145647868, 145647872),
+      (147681856, 147681860),
+      (184180312, 184180316),
+      (186359808, 186363904),
+      (236406300, 236406304),
+      (287887116, 287887120),
+      (288894976, 288899072),
+      (408498176, 408502272),
+      (417193984, 417198080),
+      (446427136, 446431232),
+      (461309724, 461309728),
+      (473165824, 473169920),
+      (486749340, 486749344),
+      (513162648, 513162652),
+      (541966376, 541966380),
+      (552910848, 552914944),
+      (614453248, 614457344),
+      (616398848, 616402944),
+      (651694080, 651698176),
+      (800833536, 800837632),
+    ],
+    [
+      4, 82388, 85157, 85477, 85651, 111034, 136067, 165267, 167390, 174527, 181055,
+      200524, 215549, 216024, 224641, 261052, 85585559, 99429208, 103520831, 104029328,
+      113153942, 126210439, 139080643, 182436295, 188796199, 195399526, 202600458,
+    ],
+    "0/0 7/16852 19621 19941 20115 45498 70531 99731 101854 108991 115519 134988 150013 150488 159105 195516 12/18476695 32320344 36411967 36920464 46045078 59101575 71971779 115327431 121687335 128290662 135491594",
+    "{\"0\":[0],\"7\":[16852,19621,19941,20115,45498,70531,99731,101854,108991,115519,134988,150013,150488,159105,195516],\"12\":[18476695,32320344,36411967,36920464,46045078,59101575,71971779,115327431,121687335,128290662,135491594]}",
+  )
+}
+
+///|
+test "moc oracle set-02-intersection" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 12/18476695 32320344 36411967 36920464 46045078 59101575 71971779 115327431 121687335 128290662 135491594",
+    limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 7/16852 19621 19941 20115 45498 70531 99731 101854 108991 115519 134988 150013 150488 159105 195516",
+    limits,
+  )
+  let actual = a.intersection(b, limits)
+  moc_oracle_assert(
+    "set-02-intersection",
+    actual,
+    12,
+    [(0, 33554432)],
+    [16, 17],
+    "1/0-1 12/",
+    "{\"1\":[0,1],\"12\":[]}",
+  )
+}
+
+///|
+test "moc oracle set-02-difference" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 12/18476695 32320344 36411967 36920464 46045078 59101575 71971779 115327431 121687335 128290662 135491594",
+    limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 7/16852 19621 19941 20115 45498 70531 99731 101854 108991 115519 134988 150013 150488 159105 195516",
+    limits,
+  )
+  let actual = a.difference(b, limits)
+  moc_oracle_assert(
+    "set-02-difference",
+    actual,
+    12,
+    [
+      (33554432, 67108864),
+      (73906780, 73906784),
+      (129281376, 129281380),
+      (145647868, 145647872),
+      (147681856, 147681860),
+      (184180312, 184180316),
+      (236406300, 236406304),
+      (287887116, 287887120),
+      (461309724, 461309728),
+      (486749340, 486749344),
+      (513162648, 513162652),
+      (541966376, 541966380),
+    ],
+    [
+      18, 19, 85585559, 99429208, 103520831, 104029328, 113153942, 126210439, 139080643,
+      182436295, 188796199, 195399526, 202600458,
+    ],
+    "1/2-3 12/18476695 32320344 36411967 36920464 46045078 59101575 71971779 115327431 121687335 128290662 135491594",
+    "{\"1\":[2,3],\"12\":[18476695,32320344,36411967,36920464,46045078,59101575,71971779,115327431,121687335,128290662,135491594]}",
+  )
+}
+
+///|
+test "moc oracle set-02-complement" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 12/18476695 32320344 36411967 36920464 46045078 59101575 71971779 115327431 121687335 128290662 135491594",
+    limits,
+  )
+  let actual = a.complement(limits)
+  moc_oracle_assert(
+    "set-02-complement",
+    actual,
+    12,
+    [
+      (67108864, 73906780),
+      (73906784, 129281376),
+      (129281380, 145647868),
+      (145647872, 147681856),
+      (147681860, 184180312),
+      (184180316, 236406300),
+      (236406304, 287887116),
+      (287887120, 461309724),
+      (461309728, 486749340),
+      (486749344, 513162648),
+      (513162652, 541966376),
+      (541966380, 805306368),
+    ],
+    [
+      9, 13, 14, 15, 21, 22, 25, 27, 28, 29, 31, 32, 34, 35, 40, 41, 42, 44, 47,
+      49, 50, 51, 80, 82, 83, 92, 93, 95, 96, 97, 104, 105, 106, 121, 122, 123, 133,
+      134, 135, 172, 174, 175, 181, 182, 183, 184, 185, 187, 192, 194, 195, 324,
+      325, 327, 376, 377, 378, 392, 393, 395, 397, 398, 399, 428, 429, 430, 480,
+      482, 483, 528, 529, 531, 692, 693, 694, 721, 722, 723, 744, 746, 747, 773,
+      774, 775, 1304, 1306, 1307, 1516, 1518, 1519, 1576, 1577, 1578, 1584, 1585,
+      1586, 1724, 1725, 1727, 1924, 1926, 1927, 2120, 2121, 2123, 2780, 2781, 2782,
+      2881, 2882, 2883, 2980, 2982, 2983, 3088, 3089, 3090, 5220, 5221, 5222, 6069,
+      6070, 6071, 6316, 6317, 6319, 6348, 6350, 6351, 6904, 6905, 6907, 7700, 7701,
+      7702, 8489, 8490, 8491, 11132, 11133, 11134, 11520, 11521, 11522, 11924, 11925,
+      11927, 12364, 12366, 12367, 20892, 20893, 20895, 24272, 24273, 24275, 25272,
+      25274, 25275, 25396, 25398, 25399, 27624, 27626, 27627, 30812, 30814, 30815,
+      33952, 33953, 33954, 44541, 44542, 44543, 46093, 46094, 46095, 47705, 47706,
+      47707, 49460, 49461, 49462, 83576, 83577, 83578, 97096, 97097, 97099, 101092,
+      101093, 101095, 101588, 101589, 101590, 110500, 110502, 110503, 123253, 123254,
+      123255, 135821, 135822, 135823, 178161, 178162, 178163, 184368, 184369, 184370,
+      190816, 190817, 190818, 197853, 197854, 197855, 334316, 334317, 334319, 388392,
+      388393, 388394, 404376, 404377, 404379, 406365, 406366, 406367, 442004, 442005,
+      442006, 493008, 493010, 493011, 543280, 543281, 543282, 712640, 712642, 712643,
+      737484, 737486, 737487, 763276, 763277, 763278, 791409, 791410, 791411, 1337272,
+      1337273, 1337275, 1553580, 1553582, 1553583, 1617513, 1617514, 1617515, 1625456,
+      1625457, 1625459, 1768028, 1768029, 1768031, 1972036, 1972037, 1972039, 2173132,
+      2173133, 2173134, 2850564, 2850565, 2850566, 2949941, 2949942, 2949943, 3053116,
+      3053118, 3053119, 3165633, 3165634, 3165635, 5349096, 5349098, 5349099, 6214324,
+      6214326, 6214327, 6470048, 6470049, 6470050, 6501832, 6501834, 6501835, 7072120,
+      7072122, 7072123, 7888153, 7888154, 7888155, 8692541, 8692542, 8692543, 11402269,
+      11402270, 11402271, 11799760, 11799761, 11799763, 12212468, 12212469, 12212471,
+      12662529, 12662530, 12662531, 21396388, 21396390, 21396391, 24857300, 24857301,
+      24857303, 25880204, 25880205, 25880206, 26007333, 26007334, 26007335, 28288484,
+      28288486, 28288487, 31552608, 31552610, 31552611, 34770161, 34770162, 34770163,
+      45609072, 45609074, 45609075, 47199048, 47199050, 47199051, 48849880, 48849882,
+      48849883, 50650112, 50650113, 50650115, 85585556, 85585557, 85585558, 99429209,
+      99429210, 99429211, 103520828, 103520829, 103520830, 104029329, 104029330,
+      104029331, 113153940, 113153941, 113153943, 126210436, 126210437, 126210438,
+      139080640, 139080641, 139080642, 182436292, 182436293, 182436294, 188796196,
+      188796197, 188796198, 195399524, 195399525, 195399527, 202600456, 202600457,
+      202600459,
+    ],
+    "0/5 9-11 1/5-6 9 11-13 15-16 18-19 24-26 28 31 33-35 2/16 18-19 28-29 31-33 40-42 57-59 69-71 108 110-111 117-121 123 128 130-131 3/68-69 71 120-122 136-137 139 141-143 172-174 224 226-227 272-273 275 436-438 465-467 488 490-491 517-519 4/280 282-283 492 494-495 552-554 560-562 700-701 703 900 902-903 1096-1097 1099 1756-1758 1857-1859 1956 1958-1959 2064-2066 5/1124-1126 1973-1975 2220-2221 2223 2252 2254-2255 2808-2809 2811 3604-3606 4393-4395 7036-7038 7424-7426 7828-7829 7831 8268 8270-8271 6/4508-4509 4511 7888-7889 7891 8888 8890-8891 9012 9014-9015 11240 11242-11243 14428 14430-14431 17568-17570 28157-28159 29709-29711 31321-31323 33076-33078 7/18040-18042 31560-31561 31563 35556-35557 35559 36052-36054 44964 44966-44967 57717-57719 70285-70287 112625-112627 118832-118834 125280-125282 132317-132319 8/72172-72173 72175 126248-126250 142232-142233 142235 144221-144223 179860-179862 230864 230866-230867 281136-281138 450496 450498-450499 475340 475342-475343 501132-501134 529265-529267 9/288696-288697 288699 505004 505006-505007 568937-568939 576880-576881 576883 719452-719453 719455 923460-923461 923463 1124556-1124558 1801988-1801990 1901365-1901367 2004540 2004542-2004543 2117057-2117059 10/1154792 1154794-1154795 2020020 2020022-2020023 2275744-2275746 2307528 2307530-2307531 2877816 2877818-2877819 3693849-3693851 4498237-4498239 7207965-7207967 7605456-7605457 7605459 8018164-8018165 8018167 8468225-8468227 11/4619172 4619174-4619175 8080084-8080085 8080087 9102988-9102990 9230117-9230119 11511268 11511270-11511271 14775392 14775394-14775395 17992945-17992947 28831856 28831858-28831859 30421832 30421834-30421835 32072664 32072666-32072667 33872896-33872897 33872899 12/18476692-18476694 32320345-32320347 36411964-36411966 36920465-36920467 46045076-46045077 46045079 59101572-59101574 71971776-71971778 115327428-115327430 121687332-121687334 128290660-128290661 128290663 135491592-135491593 135491595",
+    "{\"0\":[5,9,10,11],\"1\":[5,6,9,11,12,13,15,16,18,19,24,25,26,28,31,33,34,35],\"2\":[16,18,19,28,29,31,32,33,40,41,42,57,58,59,69,70,71,108,110,111,117,118,119,120,121,123,128,130,131],\"3\":[68,69,71,120,121,122,136,137,139,141,142,143,172,173,174,224,226,227,272,273,275,436,437,438,465,466,467,488,490,491,517,518,519],\"4\":[280,282,283,492,494,495,552,553,554,560,561,562,700,701,703,900,902,903,1096,1097,1099,1756,1757,1758,1857,1858,1859,1956,1958,1959,2064,2065,2066],\"5\":[1124,1125,1126,1973,1974,1975,2220,2221,2223,2252,2254,2255,2808,2809,2811,3604,3605,3606,4393,4394,4395,7036,7037,7038,7424,7425,7426,7828,7829,7831,8268,8270,8271],\"6\":[4508,4509,4511,7888,7889,7891,8888,8890,8891,9012,9014,9015,11240,11242,11243,14428,14430,14431,17568,17569,17570,28157,28158,28159,29709,29710,29711,31321,31322,31323,33076,33077,33078],\"7\":[18040,18041,18042,31560,31561,31563,35556,35557,35559,36052,36053,36054,44964,44966,44967,57717,57718,57719,70285,70286,70287,112625,112626,112627,118832,118833,118834,125280,125281,125282,132317,132318,132319],\"8\":[72172,72173,72175,126248,126249,126250,142232,142233,142235,144221,144222,144223,179860,179861,179862,230864,230866,230867,281136,281137,281138,450496,450498,450499,475340,475342,475343,501132,501133,501134,529265,529266,529267],\"9\":[288696,288697,288699,505004,505006,505007,568937,568938,568939,576880,576881,576883,719452,719453,719455,923460,923461,923463,1124556,1124557,1124558,1801988,1801989,1801990,1901365,1901366,1901367,2004540,2004542,2004543,2117057,2117058,2117059],\"10\":[1154792,1154794,1154795,2020020,2020022,2020023,2275744,2275745,2275746,2307528,2307530,2307531,2877816,2877818,2877819,3693849,3693850,3693851,4498237,4498238,4498239,7207965,7207966,7207967,7605456,7605457,7605459,8018164,8018165,8018167,8468225,8468226,8468227],\"11\":[4619172,4619174,4619175,8080084,8080085,8080087,9102988,9102989,9102990,9230117,9230118,9230119,11511268,11511270,11511271,14775392,14775394,14775395,17992945,17992946,17992947,28831856,28831858,28831859,30421832,30421834,30421835,32072664,32072666,32072667,33872896,33872897,33872899],\"12\":[18476692,18476693,18476694,32320345,32320346,32320347,36411964,36411965,36411966,36920465,36920466,36920467,46045076,46045077,46045079,59101572,59101573,59101574,71971776,71971777,71971778,115327428,115327429,115327430,121687332,121687333,121687334,128290660,128290661,128290663,135491592,135491593,135491595]}",
+  )
+}
+
+///|
+test "moc oracle set-03-union" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 3/127 137 147 156 197 245 318 385 572 593 695 743 754 766", limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 10/689006 1115231 1252765 1858561 3190884 3852671 4630637 6375533 6847275 6948525 7053067 7430282 8266861 9986117 11381396 12115734",
+    limits,
+  )
+  let actual = a.union(b, limits)
+  moc_oracle_assert(
+    "set-03-union",
+    actual,
+    10,
+    [
+      (0, 67108864),
+      (71374784, 71374848),
+      (80176960, 80177024),
+      (118947904, 118947968),
+      (133169152, 134217728),
+      (143654912, 144703488),
+      (154140672, 155189248),
+      (163577856, 164626432),
+      (204216576, 204216640),
+      (206569472, 207618048),
+      (246570944, 246571008),
+      (256901120, 257949696),
+      (296360768, 296360832),
+      (333447168, 334495744),
+      (403701760, 404750336),
+      (408034112, 408034176),
+      (438225600, 438225664),
+      (444705600, 444705664),
+      (451396288, 451396352),
+      (475538048, 475538112),
+      (529079104, 529079168),
+      (599785472, 600834048),
+      (621805568, 622854144),
+      (639111488, 639111552),
+      (728409344, 728409408),
+      (728760320, 729808896),
+      (775406976, 775407040),
+      (779091968, 780140544),
+      (790626304, 791674880),
+      (803209216, 804257792),
+    ],
+    [
+      4, 383, 393, 403, 412, 453, 501, 574, 641, 828, 849, 951, 999, 1010, 1022,
+      5309535, 5447069, 6052865, 7385188, 8046975, 8824941, 10569837, 11041579, 11142829,
+      11247371, 11624586, 12461165, 14180421, 15575700, 16310038,
+    ],
+    "0/0 3/127 137 147 156 197 245 318 385 572 593 695 743 754 766 10/1115231 1252765 1858561 3190884 3852671 4630637 6375533 6847275 6948525 7053067 7430282 8266861 9986117 11381396 12115734",
+    "{\"0\":[0],\"3\":[127,137,147,156,197,245,318,385,572,593,695,743,754,766],\"10\":[1115231,1252765,1858561,3190884,3852671,4630637,6375533,6847275,6948525,7053067,7430282,8266861,9986117,11381396,12115734]}",
+  )
+}
+
+///|
+test "moc oracle set-03-intersection" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 3/127 137 147 156 197 245 318 385 572 593 695 743 754 766", limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 10/689006 1115231 1252765 1858561 3190884 3852671 4630637 6375533 6847275 6948525 7053067 7430282 8266861 9986117 11381396 12115734",
+    limits,
+  )
+  let actual = a.intersection(b, limits)
+  moc_oracle_assert(
+    "set-03-intersection",
+    actual,
+    10,
+    [(0, 33554432), (44096384, 44096448)],
+    [16, 17, 4883310],
+    "1/0-1 10/689006",
+    "{\"1\":[0,1],\"10\":[689006]}",
+  )
+}
+
+///|
+test "moc oracle set-03-difference" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 3/127 137 147 156 197 245 318 385 572 593 695 743 754 766", limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 10/689006 1115231 1252765 1858561 3190884 3852671 4630637 6375533 6847275 6948525 7053067 7430282 8266861 9986117 11381396 12115734",
+    limits,
+  )
+  let actual = a.difference(b, limits)
+  moc_oracle_assert(
+    "set-03-difference",
+    actual,
+    10,
+    [
+      (33554432, 44096384),
+      (44096448, 67108864),
+      (133169152, 134217728),
+      (143654912, 144703488),
+      (154140672, 155189248),
+      (163577856, 164626432),
+      (206569472, 207618048),
+      (256901120, 257949696),
+      (333447168, 334495744),
+      (403701760, 404750336),
+      (599785472, 600834048),
+      (621805568, 622854144),
+      (728760320, 729808896),
+      (779091968, 780140544),
+      (790626304, 791674880),
+      (803209216, 804257792),
+    ],
+    [
+      19, 72, 73, 75, 296, 297, 299, 383, 393, 403, 412, 453, 501, 574, 641, 828,
+      849, 951, 999, 1010, 1022, 1193, 1194, 1195, 4769, 4770, 4771, 19072, 19073,
+      19074, 76300, 76302, 76303, 305204, 305205, 305207, 1220824, 1220825, 1220826,
+      4883308, 4883309, 4883311,
+    ],
+    "1/3 2/8-9 11 3/40-41 43 127 137 147 156 197 245 318 385 572 593 695 743 754 766 4/169-171 5/673-675 6/2688-2690 7/10764 10766-10767 8/43060-43061 43063 9/172248-172250 10/689004-689005 689007",
+    "{\"1\":[3],\"2\":[8,9,11],\"3\":[40,41,43,127,137,147,156,197,245,318,385,572,593,695,743,754,766],\"4\":[169,170,171],\"5\":[673,674,675],\"6\":[2688,2689,2690],\"7\":[10764,10766,10767],\"8\":[43060,43061,43063],\"9\":[172248,172249,172250],\"10\":[689004,689005,689007]}",
+  )
+}
+
+///|
+test "moc oracle set-03-complement" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 3/127 137 147 156 197 245 318 385 572 593 695 743 754 766", limits,
+  )
+  let actual = a.complement(limits)
+  moc_oracle_assert(
+    "set-03-complement",
+    actual,
+    3,
+    [
+      (67108864, 133169152),
+      (134217728, 143654912),
+      (144703488, 154140672),
+      (155189248, 163577856),
+      (164626432, 206569472),
+      (207618048, 256901120),
+      (257949696, 333447168),
+      (334495744, 403701760),
+      (404750336, 599785472),
+      (600834048, 621805568),
+      (622854144, 728760320),
+      (729808896, 779091968),
+      (780140544, 790626304),
+      (791674880, 803209216),
+      (804257792, 805306368),
+    ],
+    [
+      9, 11, 20, 21, 22, 26, 27, 29, 30, 32, 33, 34, 41, 42, 43, 48, 49, 50, 52,
+      54, 55, 56, 57, 58, 60, 61, 92, 93, 94, 96, 97, 99, 101, 102, 112, 114, 115,
+      124, 126, 127, 140, 141, 142, 161, 162, 163, 204, 205, 206, 213, 214, 215,
+      236, 238, 239, 248, 250, 251, 253, 254, 380, 381, 382, 392, 394, 395, 400,
+      401, 402, 413, 414, 415, 452, 454, 455, 500, 502, 503, 572, 573, 575, 640,
+      642, 643, 829, 830, 831, 848, 850, 851, 948, 949, 950, 996, 997, 998, 1008,
+      1009, 1011, 1020, 1021, 1023,
+    ],
+    "0/5 7 1/4-6 10-11 13-14 16-18 25-27 32-34 36 38-42 44-45 2/28-30 32-33 35 37-38 48 50-51 60 62-63 76-78 97-99 140-142 149-151 172 174-175 184 186-187 189-190 3/124-126 136 138-139 144-146 157-159 196 198-199 244 246-247 316-317 319 384 386-387 573-575 592 594-595 692-694 740-742 752-753 755 764-765 767",
+    "{\"0\":[5,7],\"1\":[4,5,6,10,11,13,14,16,17,18,25,26,27,32,33,34,36,38,39,40,41,42,44,45],\"2\":[28,29,30,32,33,35,37,38,48,50,51,60,62,63,76,77,78,97,98,99,140,141,142,149,150,151,172,174,175,184,186,187,189,190],\"3\":[124,125,126,136,138,139,144,145,146,157,158,159,196,198,199,244,246,247,316,317,319,384,386,387,573,574,575,592,594,595,692,693,694,740,741,742,752,753,755,764,765,767]}",
+  )
+}
+
+///|
+test "moc oracle set-04-union" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 2/25 39 41 74 79 83-84 102 127 131 140 179", limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 8/60871 124119 176044 339545 359948 423911 425490 504186 525180 554432 587213 619035 641297 663135 696493 750774",
+    limits,
+  )
+  let actual = a.union(b, limits)
+  moc_oracle_assert(
+    "set-04-union",
+    actual,
+    8,
+    [
+      (0, 67108864),
+      (104857600, 109051904),
+      (127097856, 127098880),
+      (163577856, 167772160),
+      (171966464, 176160768),
+      (180269056, 180270080),
+      (310378496, 314572800),
+      (331350016, 335544320),
+      (347694080, 347695104),
+      (348127232, 356515840),
+      (368586752, 368587776),
+      (427819008, 432013312),
+      (434084864, 434085888),
+      (435701760, 435702784),
+      (516286464, 516287488),
+      (532676608, 536870912),
+      (537784320, 537785344),
+      (549453824, 553648128),
+      (567738368, 567739392),
+      (587202560, 591396864),
+      (601306112, 601307136),
+      (633891840, 633892864),
+      (656688128, 656689152),
+      (679050240, 679051264),
+      (713208832, 713209856),
+      (750780416, 754974720),
+      (768792576, 768793600),
+    ],
+    [
+      4, 89, 103, 105, 138, 143, 147, 148, 166, 191, 195, 204, 243, 386263, 438188,
+      601689, 622092, 686055, 687634, 766330, 787324, 816576, 849357, 881179, 903441,
+      925279, 958637, 1012918,
+    ],
+    "0/0 2/25 39 41 74 79 83-84 102 127 131 140 179 8/124119 176044 339545 359948 423911 425490 504186 525180 554432 587213 619035 641297 663135 696493 750774",
+    "{\"0\":[0],\"2\":[25,39,41,74,79,83,84,102,127,131,140,179],\"8\":[124119,176044,339545,359948,423911,425490,504186,525180,554432,587213,619035,641297,663135,696493,750774]}",
+  )
+}
+
+///|
+test "moc oracle set-04-intersection" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 2/25 39 41 74 79 83-84 102 127 131 140 179", limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 8/60871 124119 176044 339545 359948 423911 425490 504186 525180 554432 587213 619035 641297 663135 696493 750774",
+    limits,
+  )
+  let actual = a.intersection(b, limits)
+  moc_oracle_assert(
+    "set-04-intersection",
+    actual,
+    8,
+    [(0, 33554432), (62331904, 62332928)],
+    [16, 17, 323015],
+    "1/0-1 8/60871",
+    "{\"1\":[0,1],\"8\":[60871]}",
+  )
+}
+
+///|
+test "moc oracle set-04-difference" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 2/25 39 41 74 79 83-84 102 127 131 140 179", limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 8/60871 124119 176044 339545 359948 423911 425490 504186 525180 554432 587213 619035 641297 663135 696493 750774",
+    limits,
+  )
+  let actual = a.difference(b, limits)
+  moc_oracle_assert(
+    "set-04-difference",
+    actual,
+    8,
+    [
+      (33554432, 62331904),
+      (62332928, 67108864),
+      (104857600, 109051904),
+      (163577856, 167772160),
+      (171966464, 176160768),
+      (310378496, 314572800),
+      (331350016, 335544320),
+      (348127232, 356515840),
+      (427819008, 432013312),
+      (532676608, 536870912),
+      (549453824, 553648128),
+      (587202560, 591396864),
+      (750780416, 754974720),
+    ],
+    [
+      18, 76, 77, 79, 89, 103, 105, 138, 143, 147, 148, 166, 191, 195, 204, 243,
+      312, 313, 314, 1260, 1262, 1263, 5044, 5045, 5046, 20189, 20190, 20191, 80752,
+      80754, 80755, 323012, 323013, 323014,
+    ],
+    "1/2 2/12-13 15 25 39 41 74 79 83-84 102 127 131 140 179 3/56-58 4/236 238-239 5/948-950 6/3805-3807 7/15216 15218-15219 8/60868-60870",
+    "{\"1\":[2],\"2\":[12,13,15,25,39,41,74,79,83,84,102,127,131,140,179],\"3\":[56,57,58],\"4\":[236,238,239],\"5\":[948,949,950],\"6\":[3805,3806,3807],\"7\":[15216,15218,15219],\"8\":[60868,60869,60870]}",
+  )
+}
+
+///|
+test "moc oracle set-04-complement" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 2/25 39 41 74 79 83-84 102 127 131 140 179", limits,
+  )
+  let actual = a.complement(limits)
+  moc_oracle_assert(
+    "set-04-complement",
+    actual,
+    2,
+    [
+      (67108864, 104857600),
+      (109051904, 163577856),
+      (167772160, 171966464),
+      (176160768, 310378496),
+      (314572800, 331350016),
+      (335544320, 348127232),
+      (356515840, 427819008),
+      (432013312, 532676608),
+      (536870912, 549453824),
+      (553648128, 587202560),
+      (591396864, 750780416),
+      (754974720, 805306368),
+    ],
+    [
+      7, 13, 14, 20, 21, 23, 24, 27, 32, 33, 38, 39, 40, 42, 43, 44, 45, 46, 49,
+      50, 61, 62, 63, 88, 90, 91, 100, 101, 102, 104, 106, 107, 136, 137, 139, 140,
+      141, 142, 144, 145, 146, 149, 150, 151, 164, 165, 167, 188, 189, 190, 192,
+      193, 194, 205, 206, 207, 240, 241, 242,
+    ],
+    "0/3 9-10 1/4-5 7-8 11 16-17 22-24 26-30 33-34 45-47 2/24 26-27 36-38 40 42-43 72-73 75-78 80-82 85-87 100-101 103 124-126 128-130 141-143 176-178",
+    "{\"0\":[3,9,10],\"1\":[4,5,7,8,11,16,17,22,23,24,26,27,28,29,30,33,34,45,46,47],\"2\":[24,26,27,36,37,38,40,42,43,72,73,75,76,77,78,80,81,82,85,86,87,100,101,103,124,125,126,128,129,130,141,142,143,176,177,178]}",
+  )
+}
+
+///|
+test "moc oracle set-05-union" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 10/1818040 1906570 2232253 2252853 2888818 5189406 5441738 8088705 8507133 9569157 10138381 10595753 11696686 11957865 12308454",
+    limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 8/40648 72617 100577 173489 191511 236556 307033 351133 377520 503903 510669 511507 667956 749261 777815",
+    limits,
+  )
+  let actual = a.union(b, limits)
+  moc_oracle_assert(
+    "set-05-union",
+    actual,
+    10,
+    [
+      (0, 67108864),
+      (74359808, 74360832),
+      (102990848, 102991872),
+      (116354560, 116354624),
+      (122020480, 122020544),
+      (142864192, 142864256),
+      (144182592, 144182656),
+      (177652736, 177653760),
+      (184884352, 184884416),
+      (196107264, 196108288),
+      (242233344, 242234368),
+      (314401792, 314402816),
+      (332121984, 332122048),
+      (348271232, 348271296),
+      (359560192, 359561216),
+      (386580480, 386581504),
+      (515996672, 515997696),
+      (517677120, 517677184),
+      (522925056, 522926080),
+      (523783168, 523784192),
+      (544456512, 544456576),
+      (612426048, 612426112),
+      (648856384, 648856448),
+      (678128192, 678128256),
+      (683986944, 683987968),
+      (748587904, 748587968),
+      (765303360, 765303424),
+      (767243264, 767244288),
+      (787741056, 787741120),
+      (796482560, 796483584),
+    ],
+    [
+      4, 334761, 362721, 435633, 453655, 498700, 569177, 613277, 639664, 766047,
+      772813, 773651, 930100, 1011405, 1039959, 6012344, 6100874, 6426557, 6447157,
+      7083122, 9383710, 9636042, 12283009, 12701437, 13763461, 14332685, 14790057,
+      15890990, 16152169, 16502758,
+    ],
+    "0/0 8/72617 100577 173489 191511 236556 307033 351133 377520 503903 510669 511507 667956 749261 777815 10/1818040 1906570 2232253 2252853 2888818 5189406 5441738 8088705 8507133 9569157 10138381 10595753 11696686 11957865 12308454",
+    "{\"0\":[0],\"8\":[72617,100577,173489,191511,236556,307033,351133,377520,503903,510669,511507,667956,749261,777815],\"10\":[1818040,1906570,2232253,2252853,2888818,5189406,5441738,8088705,8507133,9569157,10138381,10595753,11696686,11957865,12308454]}",
+  )
+}
+
+///|
+test "moc oracle set-05-intersection" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 10/1818040 1906570 2232253 2252853 2888818 5189406 5441738 8088705 8507133 9569157 10138381 10595753 11696686 11957865 12308454",
+    limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 8/40648 72617 100577 173489 191511 236556 307033 351133 377520 503903 510669 511507 667956 749261 777815",
+    limits,
+  )
+  let actual = a.intersection(b, limits)
+  moc_oracle_assert(
+    "set-05-intersection",
+    actual,
+    10,
+    [(0, 33554432), (41623552, 41624576)],
+    [16, 17, 302792],
+    "1/0-1 8/40648 10/",
+    "{\"1\":[0,1],\"8\":[40648],\"10\":[]}",
+  )
+}
+
+///|
+test "moc oracle set-05-difference" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 10/1818040 1906570 2232253 2252853 2888818 5189406 5441738 8088705 8507133 9569157 10138381 10595753 11696686 11957865 12308454",
+    limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 8/40648 72617 100577 173489 191511 236556 307033 351133 377520 503903 510669 511507 667956 749261 777815",
+    limits,
+  )
+  let actual = a.difference(b, limits)
+  moc_oracle_assert(
+    "set-05-difference",
+    actual,
+    10,
+    [
+      (33554432, 41623552),
+      (41624576, 67108864),
+      (116354560, 116354624),
+      (122020480, 122020544),
+      (142864192, 142864256),
+      (144182592, 144182656),
+      (184884352, 184884416),
+      (332121984, 332122048),
+      (348271232, 348271296),
+      (517677120, 517677184),
+      (544456512, 544456576),
+      (612426048, 612426112),
+      (648856384, 648856448),
+      (678128192, 678128256),
+      (748587904, 748587968),
+      (765303360, 765303424),
+      (787741056, 787741120),
+    ],
+    [
+      19, 72, 74, 75, 292, 293, 294, 1180, 1181, 1183, 4728, 4729, 4730, 18925, 18926,
+      18927, 75696, 75697, 75699, 302793, 302794, 302795, 6012344, 6100874, 6426557,
+      6447157, 7083122, 9383710, 9636042, 12283009, 12701437, 13763461, 14332685,
+      14790057, 15890990, 16152169, 16502758,
+    ],
+    "1/3 2/8 10-11 3/36-38 4/156-157 159 5/632-634 6/2541-2543 7/10160-10161 10163 8/40649-40651 10/1818040 1906570 2232253 2252853 2888818 5189406 5441738 8088705 8507133 9569157 10138381 10595753 11696686 11957865 12308454",
+    "{\"1\":[3],\"2\":[8,10,11],\"3\":[36,37,38],\"4\":[156,157,159],\"5\":[632,633,634],\"6\":[2541,2542,2543],\"7\":[10160,10161,10163],\"8\":[40649,40650,40651],\"10\":[1818040,1906570,2232253,2252853,2888818,5189406,5441738,8088705,8507133,9569157,10138381,10595753,11696686,11957865,12308454]}",
+  )
+}
+
+///|
+test "moc oracle set-05-complement" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 10/1818040 1906570 2232253 2252853 2888818 5189406 5441738 8088705 8507133 9569157 10138381 10595753 11696686 11957865 12308454",
+    limits,
+  )
+  let actual = a.complement(limits)
+  moc_oracle_assert(
+    "set-05-complement",
+    actual,
+    10,
+    [
+      (67108864, 116354560),
+      (116354624, 122020480),
+      (122020544, 142864192),
+      (142864256, 144182592),
+      (144182656, 184884352),
+      (184884416, 332121984),
+      (332122048, 348271232),
+      (348271296, 517677120),
+      (517677184, 544456512),
+      (544456576, 612426048),
+      (612426112, 648856384),
+      (648856448, 678128192),
+      (678128256, 748587904),
+      (748587968, 765303360),
+      (765303424, 787741056),
+      (787741120, 805306368),
+    ],
+    [
+      7, 10, 20, 21, 25, 26, 32, 33, 34, 37, 38, 39, 44, 45, 47, 49, 50, 51, 53,
+      55, 57, 58, 59, 63, 88, 89, 90, 92, 94, 95, 96, 97, 99, 109, 110, 111, 140,
+      141, 142, 144, 145, 146, 184, 185, 186, 192, 194, 195, 208, 209, 211, 216,
+      217, 219, 224, 226, 227, 240, 241, 243, 244, 245, 247, 248, 249, 250, 364,
+      365, 367, 373, 374, 375, 394, 395, 433, 434, 435, 573, 574, 575, 589, 590,
+      591, 748, 750, 751, 772, 773, 774, 841, 842, 843, 872, 873, 875, 900, 901,
+      903, 968, 970, 971, 984, 986, 987, 1004, 1005, 1006, 1464, 1465, 1466, 1488,
+      1490, 1491, 1569, 1570, 1571, 1572, 1573, 1575, 1728, 1730, 1731, 2288, 2289,
+      2291, 2353, 2354, 2355, 2996, 2997, 2999, 3101, 3102, 3103, 3361, 3362, 3363,
+      3496, 3497, 3498, 3608, 3609, 3611, 3876, 3877, 3878, 3940, 3941, 3942, 4029,
+      4030, 4031, 5868, 5869, 5870, 5956, 5958, 5959, 6272, 6273, 6274, 6297, 6298,
+      6299, 6916, 6918, 6919, 9160, 9161, 9162, 9408, 9409, 9411, 11992, 11993, 11994,
+      12400, 12401, 12402, 13441, 13442, 13443, 13997, 13998, 13999, 14440, 14441,
+      14442, 15516, 15517, 15519, 15772, 15774, 15775, 16112, 16113, 16114, 23484,
+      23486, 23487, 23828, 23829, 23830, 25100, 25101, 25102, 25185, 25186, 25187,
+      27669, 27670, 27671, 36652, 36653, 36654, 37641, 37642, 37643, 47981, 47982,
+      47983, 49612, 49613, 49615, 53760, 53761, 53762, 55984, 55985, 55986, 57772,
+      57774, 57775, 62072, 62073, 62075, 63092, 63093, 63095, 64460, 64461, 64462,
+      93940, 93941, 93943, 95324, 95325, 95327, 100412, 100413, 100415, 100737, 100738,
+      100739, 110672, 110674, 110675, 146621, 146622, 146623, 150560, 150561, 150562,
+      191920, 191921, 191923, 198456, 198457, 198458, 215052, 215053, 215055, 223949,
+      223950, 223951, 231092, 231093, 231095, 248297, 248298, 248299, 252376, 252378,
+      252379, 257852, 257853, 257854, 375768, 375769, 375770, 381305, 381306, 381307,
+      401656, 401657, 401658, 402944, 402945, 402946, 442692, 442693, 442694, 586480,
+      586482, 586483, 602253, 602254, 602255, 767689, 767690, 767691, 793836, 793837,
+      793838, 860217, 860218, 860219, 895793, 895794, 895795, 924376, 924377, 924379,
+      993184, 993185, 993187, 1009508, 1009509, 1009511, 1031420, 1031421, 1031423,
+      1503084, 1503085, 1503087, 1525216, 1525217, 1525219, 1606636, 1606637, 1606638,
+      1611788, 1611790, 1611791, 1770781, 1770782, 1770783, 2345924, 2345925, 2345926,
+      2409008, 2409009, 2409011, 3070753, 3070754, 3070755, 3175356, 3175357, 3175358,
+      3440864, 3440866, 3440867, 3583168, 3583169, 3583170, 3697512, 3697513, 3697515,
+      3972744, 3972745, 3972746, 4038040, 4038041, 4038043, 4125688, 4125690, 4125691,
+      6012345, 6012346, 6012347, 6100872, 6100873, 6100875, 6426556, 6426558, 6426559,
+      6447156, 6447158, 6447159, 7083120, 7083121, 7083123, 9383708, 9383709, 9383711,
+      9636040, 9636041, 9636043, 12283008, 12283010, 12283011, 12701436, 12701438,
+      12701439, 13763460, 13763462, 13763463, 14332684, 14332686, 14332687, 14790056,
+      14790058, 14790059, 15890988, 15890989, 15890991, 16152168, 16152170, 16152171,
+      16502756, 16502757, 16502759,
+    ],
+    "0/3 6 1/4-5 9-10 16-18 21-23 28-29 31 33-35 37 39 41-43 47 2/24-26 28 30-33 35 45-47 76-78 80-82 120-122 128 130-131 144-145 147 152-153 155 160 162-163 176-177 179-181 183-186 3/108-109 111 117-119 138-139 177-179 317-319 333-335 492 494-495 516-518 585-587 616-617 619 644-645 647 712 714-715 728 730-731 748-750 4/440-442 464 466-467 545-549 551 704 706-707 1264-1265 1267 1329-1331 1972-1973 1975 2077-2079 2337-2339 2472-2474 2584-2585 2587 2852-2854 2916-2918 3005-3007 5/1772-1774 1860 1862-1863 2176-2178 2201-2203 2820 2822-2823 5064-5066 5312-5313 5315 7896-7898 8304-8306 9345-9347 9901-9903 10344-10346 11420-11421 11423 11676 11678-11679 12016-12018 6/7100 7102-7103 7444-7446 8716-8718 8801-8803 11285-11287 20268-20270 21257-21259 31597-31599 33228-33229 33231 37376-37378 39600-39602 41388 41390-41391 45688-45689 45691 46708-46709 46711 48076-48078 7/28404-28405 28407 29788-29789 29791 34876-34877 34879 35201-35203 45136 45138-45139 81085-81087 85024-85026 126384-126385 126387 132920-132922 149516-149517 149519 158413-158415 165556-165557 165559 182761-182763 186840 186842-186843 192316-192318 8/113624-113626 119161-119163 139512-139514 140800-140802 180548-180550 324336 324338-324339 340109-340111 505545-505547 531692-531694 598073-598075 633649-633651 662232-662233 662235 731040-731041 731043 747364-747365 747367 769276-769277 769279 9/454508-454509 454511 476640-476641 476643 558060-558062 563212 563214-563215 722205-722207 1297348-1297350 1360432-1360433 1360435 2022177-2022179 2126780-2126782 2392288 2392290-2392291 2534592-2534594 2648936-2648937 2648939 2924168-2924170 2989464-2989465 2989467 3077112 3077114-3077115 10/1818041-1818043 1906568-1906569 1906571 2232252 2232254-2232255 2252852 2252854-2252855 2888816-2888817 2888819 5189404-5189405 5189407 5441736-5441737 5441739 8088704 8088706-8088707 8507132 8507134-8507135 9569156 9569158-9569159 10138380 10138382-10138383 10595752 10595754-10595755 11696684-11696685 11696687 11957864 11957866-11957867 12308452-12308453 12308455",
+    "{\"0\":[3,6],\"1\":[4,5,9,10,16,17,18,21,22,23,28,29,31,33,34,35,37,39,41,42,43,47],\"2\":[24,25,26,28,30,31,32,33,35,45,46,47,76,77,78,80,81,82,120,121,122,128,130,131,144,145,147,152,153,155,160,162,163,176,177,179,180,181,183,184,185,186],\"3\":[108,109,111,117,118,119,138,139,177,178,179,317,318,319,333,334,335,492,494,495,516,517,518,585,586,587,616,617,619,644,645,647,712,714,715,728,730,731,748,749,750],\"4\":[440,441,442,464,466,467,545,546,547,548,549,551,704,706,707,1264,1265,1267,1329,1330,1331,1972,1973,1975,2077,2078,2079,2337,2338,2339,2472,2473,2474,2584,2585,2587,2852,2853,2854,2916,2917,2918,3005,3006,3007],\"5\":[1772,1773,1774,1860,1862,1863,2176,2177,2178,2201,2202,2203,2820,2822,2823,5064,5065,5066,5312,5313,5315,7896,7897,7898,8304,8305,8306,9345,9346,9347,9901,9902,9903,10344,10345,10346,11420,11421,11423,11676,11678,11679,12016,12017,12018],\"6\":[7100,7102,7103,7444,7445,7446,8716,8717,8718,8801,8802,8803,11285,11286,11287,20268,20269,20270,21257,21258,21259,31597,31598,31599,33228,33229,33231,37376,37377,37378,39600,39601,39602,41388,41390,41391,45688,45689,45691,46708,46709,46711,48076,48077,48078],\"7\":[28404,28405,28407,29788,29789,29791,34876,34877,34879,35201,35202,35203,45136,45138,45139,81085,81086,81087,85024,85025,85026,126384,126385,126387,132920,132921,132922,149516,149517,149519,158413,158414,158415,165556,165557,165559,182761,182762,182763,186840,186842,186843,192316,192317,192318],\"8\":[113624,113625,113626,119161,119162,119163,139512,139513,139514,140800,140801,140802,180548,180549,180550,324336,324338,324339,340109,340110,340111,505545,505546,505547,531692,531693,531694,598073,598074,598075,633649,633650,633651,662232,662233,662235,731040,731041,731043,747364,747365,747367,769276,769277,769279],\"9\":[454508,454509,454511,476640,476641,476643,558060,558061,558062,563212,563214,563215,722205,722206,722207,1297348,1297349,1297350,1360432,1360433,1360435,2022177,2022178,2022179,2126780,2126781,2126782,2392288,2392290,2392291,2534592,2534593,2534594,2648936,2648937,2648939,2924168,2924169,2924170,2989464,2989465,2989467,3077112,3077114,3077115],\"10\":[1818041,1818042,1818043,1906568,1906569,1906571,2232252,2232254,2232255,2252852,2252854,2252855,2888816,2888817,2888819,5189404,5189405,5189407,5441736,5441737,5441739,8088704,8088706,8088707,8507132,8507134,8507135,9569156,9569158,9569159,10138380,10138382,10138383,10595752,10595754,10595755,11696684,11696685,11696687,11957864,11957866,11957867,12308452,12308453,12308455]}",
+  )
+}
+
+///|
+test "moc oracle set-06-union" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 4/304 804 1022 1348 1515 1717 1863 1931 1942 2360 2619 2811 2965", limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 13/56150873 73843012 87794827 90708772 210354725 308276576 449653427 549639056 570474350 600946168 637838010 664703654 677416741 731396630 747875511 758415001",
+    limits,
+  )
+  let actual = a.union(b, limits)
+  moc_oracle_assert(
+    "set-06-union",
+    actual,
+    13,
+    [
+      (0, 67108864),
+      (73843012, 73843013),
+      (79691776, 79953920),
+      (87794827, 87794828),
+      (90708772, 90708773),
+      (210354725, 210354726),
+      (210763776, 211025920),
+      (267911168, 268173312),
+      (308276576, 308276577),
+      (353370112, 353632256),
+      (397148160, 397410304),
+      (449653427, 449653428),
+      (450101248, 450363392),
+      (488374272, 488636416),
+      (506200064, 506462208),
+      (509083648, 509345792),
+      (549639056, 549639057),
+      (570474350, 570474351),
+      (600946168, 600946169),
+      (618659840, 618921984),
+      (637838010, 637838011),
+      (664703654, 664703655),
+      (677416741, 677416742),
+      (686555136, 686817280),
+      (731396630, 731396631),
+      (736886784, 737148928),
+      (747875511, 747875512),
+      (758415001, 758415002),
+      (777256960, 777519104),
+    ],
+    [
+      4, 1328, 1828, 2046, 2372, 2539, 2741, 2887, 2955, 2966, 3384, 3643, 3835,
+      3989, 342278468, 356230283, 359144228, 478790181, 576712032, 718088883, 818074512,
+      838909806, 869381624, 906273466, 933139110, 945852197, 999832086, 1016310967,
+      1026850457,
+    ],
+    "0/0 4/304 804 1022 1348 1515 1717 1863 1931 1942 2360 2619 2811 2965 13/73843012 87794827 90708772 210354725 308276576 449653427 549639056 570474350 600946168 637838010 664703654 677416741 731396630 747875511 758415001",
+    "{\"0\":[0],\"4\":[304,804,1022,1348,1515,1717,1863,1931,1942,2360,2619,2811,2965],\"13\":[73843012,87794827,90708772,210354725,308276576,449653427,549639056,570474350,600946168,637838010,664703654,677416741,731396630,747875511,758415001]}",
+  )
+}
+
+///|
+test "moc oracle set-06-intersection" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 4/304 804 1022 1348 1515 1717 1863 1931 1942 2360 2619 2811 2965", limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 13/56150873 73843012 87794827 90708772 210354725 308276576 449653427 549639056 570474350 600946168 637838010 664703654 677416741 731396630 747875511 758415001",
+    limits,
+  )
+  let actual = a.intersection(b, limits)
+  moc_oracle_assert(
+    "set-06-intersection",
+    actual,
+    13,
+    [(0, 33554432), (56150873, 56150874)],
+    [16, 17, 324586329],
+    "1/0-1 13/56150873",
+    "{\"1\":[0,1],\"13\":[56150873]}",
+  )
+}
+
+///|
+test "moc oracle set-06-difference" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 4/304 804 1022 1348 1515 1717 1863 1931 1942 2360 2619 2811 2965", limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 13/56150873 73843012 87794827 90708772 210354725 308276576 449653427 549639056 570474350 600946168 637838010 664703654 677416741 731396630 747875511 758415001",
+    limits,
+  )
+  let actual = a.difference(b, limits)
+  moc_oracle_assert(
+    "set-06-difference",
+    actual,
+    13,
+    [
+      (33554432, 56150873),
+      (56150874, 67108864),
+      (79691776, 79953920),
+      (210763776, 211025920),
+      (267911168, 268173312),
+      (353370112, 353632256),
+      (397148160, 397410304),
+      (450101248, 450363392),
+      (488374272, 488636416),
+      (506200064, 506462208),
+      (509083648, 509345792),
+      (618659840, 618921984),
+      (686555136, 686817280),
+      (736886784, 737148928),
+      (777256960, 777519104),
+    ],
+    [
+      18, 76, 78, 79, 308, 310, 311, 1236, 1237, 1239, 1328, 1828, 2046, 2372, 2539,
+      2741, 2887, 2955, 2966, 3384, 3643, 3835, 3989, 4953, 4954, 4955, 19808, 19809,
+      19810, 79245, 79246, 79247, 316976, 316977, 316979, 1267912, 1267913, 1267914,
+      5071660, 5071662, 5071663, 20286644, 20286646, 20286647, 81146580, 81146581,
+      81146583, 324586328, 324586330, 324586331,
+    ],
+    "1/2 2/12 14-15 3/52 54-55 4/212-213 215 304 804 1022 1348 1515 1717 1863 1931 1942 2360 2619 2811 2965 5/857-859 6/3424-3426 7/13709-13711 8/54832-54833 54835 9/219336-219338 10/877356 877358-877359 11/3509428 3509430-3509431 12/14037716-14037717 14037719 13/56150872 56150874-56150875",
+    "{\"1\":[2],\"2\":[12,14,15],\"3\":[52,54,55],\"4\":[212,213,215,304,804,1022,1348,1515,1717,1863,1931,1942,2360,2619,2811,2965],\"5\":[857,858,859],\"6\":[3424,3425,3426],\"7\":[13709,13710,13711],\"8\":[54832,54833,54835],\"9\":[219336,219337,219338],\"10\":[877356,877358,877359],\"11\":[3509428,3509430,3509431],\"12\":[14037716,14037717,14037719],\"13\":[56150872,56150874,56150875]}",
+  )
+}
+
+///|
+test "moc oracle set-06-complement" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 4/304 804 1022 1348 1515 1717 1863 1931 1942 2360 2619 2811 2965", limits,
+  )
+  let actual = a.complement(limits)
+  moc_oracle_assert(
+    "set-06-complement",
+    actual,
+    4,
+    [
+      (67108864, 79691776),
+      (79953920, 210763776),
+      (211025920, 267911168),
+      (268173312, 353370112),
+      (353632256, 397148160),
+      (397410304, 450101248),
+      (450363392, 488374272),
+      (488636416, 506200064),
+      (506462208, 509083648),
+      (509345792, 618659840),
+      (618921984, 686555136),
+      (686817280, 736886784),
+      (737148928, 777256960),
+      (777519104, 805306368),
+    ],
+    [
+      6, 8, 12, 21, 22, 23, 29, 30, 36, 38, 40, 41, 43, 44, 47, 53, 54, 55, 57, 58,
+      60, 61, 63, 80, 81, 82, 112, 113, 115, 124, 125, 126, 149, 150, 151, 156, 157,
+      159, 168, 169, 170, 181, 182, 183, 186, 187, 208, 209, 210, 224, 225, 226,
+      236, 237, 238, 248, 250, 251, 333, 334, 335, 456, 458, 459, 508, 509, 510,
+      592, 594, 595, 632, 633, 635, 684, 686, 687, 720, 722, 723, 736, 737, 739,
+      740, 742, 743, 844, 845, 847, 908, 909, 911, 956, 957, 959, 996, 998, 999,
+      1329, 1330, 1331, 1829, 1830, 1831, 2044, 2045, 2047, 2373, 2374, 2375, 2536,
+      2537, 2538, 2740, 2742, 2743, 2884, 2885, 2886, 2952, 2953, 2954, 2964, 2965,
+      2967, 3385, 3386, 3387, 3640, 3641, 3642, 3832, 3833, 3834, 3988, 3990, 3991,
+    ],
+    "0/2 4 8 1/5-7 13-14 20 22 24-25 27-28 31 37-39 41-42 44-45 47 2/16-18 48-49 51 60-62 85-87 92-93 95 104-106 117-119 122-123 144-146 160-162 172-174 184 186-187 3/77-79 200 202-203 252-254 336 338-339 376-377 379 428 430-431 464 466-467 480-481 483-484 486-487 588-589 591 652-653 655 700-701 703 740 742-743 4/305-307 805-807 1020-1021 1023 1349-1351 1512-1514 1716 1718-1719 1860-1862 1928-1930 1940-1941 1943 2361-2363 2616-2618 2808-2810 2964 2966-2967",
+    "{\"0\":[2,4,8],\"1\":[5,6,7,13,14,20,22,24,25,27,28,31,37,38,39,41,42,44,45,47],\"2\":[16,17,18,48,49,51,60,61,62,85,86,87,92,93,95,104,105,106,117,118,119,122,123,144,145,146,160,161,162,172,173,174,184,186,187],\"3\":[77,78,79,200,202,203,252,253,254,336,338,339,376,377,379,428,430,431,464,466,467,480,481,483,484,486,487,588,589,591,652,653,655,700,701,703,740,742,743],\"4\":[305,306,307,805,806,807,1020,1021,1023,1349,1350,1351,1512,1513,1514,1716,1718,1719,1860,1861,1862,1928,1929,1930,1940,1941,1943,2361,2362,2363,2616,2617,2618,2808,2809,2810,2964,2966,2967]}",
+  )
+}
+
+///|
+test "moc oracle set-07-union" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 5/2584 2830 2945 5192 5582 6198 6224 6952 7017 7720 7981 8953 10687 10704 11426",
+    limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 7/8385 33666 36885 51404 65886 84251 109543 123227 123741 123945 129131 169197 174571 186998 189089",
+    limits,
+  )
+  let actual = a.union(b, limits)
+  moc_oracle_assert(
+    "set-07-union",
+    actual,
+    7,
+    [
+      (0, 67108864),
+      (137895936, 137900032),
+      (151080960, 151085056),
+      (169345024, 169410560),
+      (185466880, 185532416),
+      (193003520, 193069056),
+      (210550784, 210554880),
+      (269869056, 269873152),
+      (340262912, 340328448),
+      (345092096, 345096192),
+      (365821952, 365887488),
+      (406192128, 406257664),
+      (407896064, 407961600),
+      (448688128, 448692224),
+      (455606272, 455671808),
+      (459866112, 459931648),
+      (504737792, 504741888),
+      (505937920, 506003456),
+      (506843136, 506847232),
+      (507678720, 507682816),
+      (523042816, 523108352),
+      (528920576, 528924672),
+      (586743808, 586809344),
+      (693030912, 693035008),
+      (700383232, 700448768),
+      (701497344, 701562880),
+      (715042816, 715046912),
+      (748814336, 748879872),
+      (765943808, 765947904),
+      (774508544, 774512640),
+    ],
+    [
+      4, 6680, 6926, 7041, 9288, 9678, 10294, 10320, 11048, 11113, 11816, 12077,
+      13049, 14783, 14800, 15522, 99202, 102421, 116940, 131422, 149787, 175079,
+      188763, 189277, 189481, 194667, 234733, 240107, 252534, 254625,
+    ],
+    "0/0 5/2584 2830 2945 5192 5582 6198 6224 6952 7017 7720 7981 8953 10687 10704 11426 7/33666 36885 51404 65886 84251 109543 123227 123741 123945 129131 169197 174571 186998 189089",
+    "{\"0\":[0],\"5\":[2584,2830,2945,5192,5582,6198,6224,6952,7017,7720,7981,8953,10687,10704,11426],\"7\":[33666,36885,51404,65886,84251,109543,123227,123741,123945,129131,169197,174571,186998,189089]}",
+  )
+}
+
+///|
+test "moc oracle set-07-intersection" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 5/2584 2830 2945 5192 5582 6198 6224 6952 7017 7720 7981 8953 10687 10704 11426",
+    limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 7/8385 33666 36885 51404 65886 84251 109543 123227 123741 123945 129131 169197 174571 186998 189089",
+    limits,
+  )
+  let actual = a.intersection(b, limits)
+  moc_oracle_assert(
+    "set-07-intersection",
+    actual,
+    7,
+    [(0, 33554432), (34344960, 34349056)],
+    [16, 17, 73921],
+    "1/0-1 7/8385",
+    "{\"1\":[0,1],\"7\":[8385]}",
+  )
+}
+
+///|
+test "moc oracle set-07-difference" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 5/2584 2830 2945 5192 5582 6198 6224 6952 7017 7720 7981 8953 10687 10704 11426",
+    limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 7/8385 33666 36885 51404 65886 84251 109543 123227 123741 123945 129131 169197 174571 186998 189089",
+    limits,
+  )
+  let actual = a.difference(b, limits)
+  moc_oracle_assert(
+    "set-07-difference",
+    actual,
+    7,
+    [
+      (33554432, 34344960),
+      (34349056, 67108864),
+      (169345024, 169410560),
+      (185466880, 185532416),
+      (193003520, 193069056),
+      (340262912, 340328448),
+      (365821952, 365887488),
+      (406192128, 406257664),
+      (407896064, 407961600),
+      (455606272, 455671808),
+      (459866112, 459931648),
+      (505937920, 506003456),
+      (523042816, 523108352),
+      (586743808, 586809344),
+      (700383232, 700448768),
+      (701497344, 701562880),
+      (748814336, 748879872),
+    ],
+    [
+      19, 73, 74, 75, 289, 290, 291, 1152, 1153, 1154, 4621, 4622, 4623, 6680, 6926,
+      7041, 9288, 9678, 10294, 10320, 11048, 11113, 11816, 12077, 13049, 14783, 14800,
+      15522, 18481, 18482, 18483, 73920, 73922, 73923,
+    ],
+    "1/3 2/9-11 3/33-35 4/128-130 5/525-527 2584 2830 2945 5192 5582 6198 6224 6952 7017 7720 7981 8953 10687 10704 11426 6/2097-2099 7/8384 8386-8387",
+    "{\"1\":[3],\"2\":[9,10,11],\"3\":[33,34,35],\"4\":[128,129,130],\"5\":[525,526,527,2584,2830,2945,5192,5582,6198,6224,6952,7017,7720,7981,8953,10687,10704,11426],\"6\":[2097,2098,2099],\"7\":[8384,8386,8387]}",
+  )
+}
+
+///|
+test "moc oracle set-07-complement" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 5/2584 2830 2945 5192 5582 6198 6224 6952 7017 7720 7981 8953 10687 10704 11426",
+    limits,
+  )
+  let actual = a.complement(limits)
+  moc_oracle_assert(
+    "set-07-complement",
+    actual,
+    5,
+    [
+      (67108864, 169345024),
+      (169410560, 185466880),
+      (185532416, 193003520),
+      (193069056, 340262912),
+      (340328448, 365821952),
+      (365887488, 406192128),
+      (406257664, 407896064),
+      (407961600, 455606272),
+      (455671808, 459866112),
+      (459931648, 505937920),
+      (506003456, 523042816),
+      (523108352, 586743808),
+      (586809344, 700383232),
+      (700448768, 701497344),
+      (701562880, 748814336),
+      (748879872, 805306368),
+    ],
+    [
+      5, 7, 8, 13, 24, 25, 38, 39, 41, 42, 44, 45, 48, 49, 51, 56, 58, 59, 61, 62,
+      63, 105, 106, 107, 109, 111, 144, 146, 147, 148, 149, 150, 162, 163, 174, 175,
+      185, 186, 187, 189, 190, 191, 200, 201, 202, 228, 229, 240, 241, 243, 416,
+      418, 419, 433, 434, 435, 441, 442, 443, 581, 582, 583, 605, 606, 607, 640,
+      641, 642, 644, 646, 647, 688, 689, 691, 692, 693, 695, 736, 737, 739, 752,
+      753, 755, 812, 813, 814, 920, 921, 922, 924, 926, 927, 968, 969, 971, 1668,
+      1669, 1671, 1728, 1729, 1730, 1761, 1762, 1763, 2320, 2321, 2323, 2416, 2417,
+      2418, 2572, 2574, 2575, 2581, 2582, 2583, 2760, 2761, 2763, 2776, 2777, 2779,
+      2952, 2953, 2955, 3016, 3017, 3018, 3260, 3261, 3263, 3692, 3693, 3694, 3701,
+      3702, 3703, 3881, 3882, 3883, 6681, 6682, 6683, 6924, 6925, 6927, 7040, 7042,
+      7043, 9289, 9290, 9291, 9676, 9677, 9679, 10292, 10293, 10295, 10321, 10322,
+      10323, 11049, 11050, 11051, 11112, 11114, 11115, 11817, 11818, 11819, 12076,
+      12078, 12079, 13048, 13050, 13051, 14780, 14781, 14782, 14801, 14802, 14803,
+      15520, 15521, 15523,
+    ],
+    "0/1 3-4 9 1/8-9 22-23 25-26 28-29 32-33 35 40 42-43 45-47 2/41-43 45 47 80 82-86 98-99 110-111 121-123 125-127 136-138 164-165 176-177 179 3/160 162-163 177-179 185-187 325-327 349-351 384-386 388 390-391 432-433 435-437 439 480-481 483 496-497 499 556-558 664-666 668 670-671 712-713 715 4/644-645 647 704-706 737-739 1296-1297 1299 1392-1394 1548 1550-1551 1557-1559 1736-1737 1739 1752-1753 1755 1928-1929 1931 1992-1994 2236-2237 2239 2668-2670 2677-2679 2857-2859 5/2585-2587 2828-2829 2831 2944 2946-2947 5193-5195 5580-5581 5583 6196-6197 6199 6225-6227 6953-6955 7016 7018-7019 7721-7723 7980 7982-7983 8952 8954-8955 10684-10686 10705-10707 11424-11425 11427",
+    "{\"0\":[1,3,4,9],\"1\":[8,9,22,23,25,26,28,29,32,33,35,40,42,43,45,46,47],\"2\":[41,42,43,45,47,80,82,83,84,85,86,98,99,110,111,121,122,123,125,126,127,136,137,138,164,165,176,177,179],\"3\":[160,162,163,177,178,179,185,186,187,325,326,327,349,350,351,384,385,386,388,390,391,432,433,435,436,437,439,480,481,483,496,497,499,556,557,558,664,665,666,668,670,671,712,713,715],\"4\":[644,645,647,704,705,706,737,738,739,1296,1297,1299,1392,1393,1394,1548,1550,1551,1557,1558,1559,1736,1737,1739,1752,1753,1755,1928,1929,1931,1992,1993,1994,2236,2237,2239,2668,2669,2670,2677,2678,2679,2857,2858,2859],\"5\":[2585,2586,2587,2828,2829,2831,2944,2946,2947,5193,5194,5195,5580,5581,5583,6196,6197,6199,6225,6226,6227,6953,6954,6955,7016,7018,7019,7721,7722,7723,7980,7982,7983,8952,8954,8955,10684,10685,10686,10705,10706,10707,11424,11425,11427]}",
+  )
+}
+
+///|
+test "moc oracle set-08-union" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 5/1683 2112 2509 2949 3572 4426 6013 6382 7362 7797 8815 10122 10723 11660 11798 12069",
+    limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 5/722 853 1531 1754 2472 2552 4072 5278 6785 7109 8725 8771 9328 9631 10062",
+    limits,
+  )
+  let actual = a.union(b, limits)
+  moc_oracle_assert(
+    "set-08-union",
+    actual,
+    5,
+    [
+      (0, 67108864),
+      (100335616, 100401152),
+      (110297088, 110362624),
+      (114950144, 115015680),
+      (138412032, 138477568),
+      (162004992, 162070528),
+      (164429824, 164495360),
+      (167247872, 167313408),
+      (193265664, 193331200),
+      (234094592, 234160128),
+      (266862592, 266928128),
+      (290062336, 290127872),
+      (345899008, 345964544),
+      (394067968, 394133504),
+      (418250752, 418316288),
+      (444661760, 444727296),
+      (465895424, 465960960),
+      (482476032, 482541568),
+      (510984192, 511049728),
+      (571801600, 571867136),
+      (574816256, 574881792),
+      (577699840, 577765376),
+      (611319808, 611385344),
+      (631177216, 631242752),
+      (659423232, 659488768),
+      (663355392, 663420928),
+      (702742528, 702808064),
+      (764149760, 764215296),
+      (773193728, 773259264),
+      (790953984, 791019520),
+    ],
+    [
+      4, 5627, 5779, 5850, 6208, 6568, 6605, 6648, 7045, 7668, 8168, 8522, 9374,
+      10109, 10478, 10881, 11205, 11458, 11893, 12821, 12867, 12911, 13424, 13727,
+      14158, 14218, 14819, 15756, 15894, 16165,
+    ],
+    "0/0 5/1531 1683 1754 2112 2472 2509 2552 2949 3572 4072 4426 5278 6013 6382 6785 7109 7362 7797 8725 8771 8815 9328 9631 10062 10122 10723 11660 11798 12069",
+    "{\"0\":[0],\"5\":[1531,1683,1754,2112,2472,2509,2552,2949,3572,4072,4426,5278,6013,6382,6785,7109,7362,7797,8725,8771,8815,9328,9631,10062,10122,10723,11660,11798,12069]}",
+  )
+}
+
+///|
+test "moc oracle set-08-intersection" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 5/1683 2112 2509 2949 3572 4426 6013 6382 7362 7797 8815 10122 10723 11660 11798 12069",
+    limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 5/722 853 1531 1754 2472 2552 4072 5278 6785 7109 8725 8771 9328 9631 10062",
+    limits,
+  )
+  let actual = a.intersection(b, limits)
+  moc_oracle_assert(
+    "set-08-intersection",
+    actual,
+    5,
+    [(0, 33554432), (47316992, 47382528), (55902208, 55967744)],
+    [16, 17, 4818, 4949],
+    "1/0-1 5/722 853",
+    "{\"1\":[0,1],\"5\":[722,853]}",
+  )
+}
+
+///|
+test "moc oracle set-08-difference" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 5/1683 2112 2509 2949 3572 4426 6013 6382 7362 7797 8815 10122 10723 11660 11798 12069",
+    limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 5/722 853 1531 1754 2472 2552 4072 5278 6785 7109 8725 8771 9328 9631 10062",
+    limits,
+  )
+  let actual = a.difference(b, limits)
+  moc_oracle_assert(
+    "set-08-difference",
+    actual,
+    5,
+    [
+      (33554432, 47316992),
+      (47382528, 55902208),
+      (55967744, 67108864),
+      (110297088, 110362624),
+      (138412032, 138477568),
+      (164429824, 164495360),
+      (193265664, 193331200),
+      (234094592, 234160128),
+      (290062336, 290127872),
+      (394067968, 394133504),
+      (418250752, 418316288),
+      (482476032, 482541568),
+      (510984192, 511049728),
+      (577699840, 577765376),
+      (663355392, 663420928),
+      (702742528, 702808064),
+      (764149760, 764215296),
+      (773193728, 773259264),
+      (790953984, 791019520),
+    ],
+    [
+      72, 73, 74, 76, 78, 79, 300, 302, 303, 308, 310, 311, 1205, 1206, 1207, 1236,
+      1238, 1239, 4816, 4817, 4819, 4948, 4950, 4951, 5779, 6208, 6605, 7045, 7668,
+      8522, 10109, 10478, 11458, 11893, 12911, 14218, 14819, 15756, 15894, 16165,
+    ],
+    "2/8-10 12 14-15 3/44 46-47 52 54-55 4/181-183 212 214-215 5/720-721 723 852 854-855 1683 2112 2509 2949 3572 4426 6013 6382 7362 7797 8815 10122 10723 11660 11798 12069",
+    "{\"2\":[8,9,10,12,14,15],\"3\":[44,46,47,52,54,55],\"4\":[181,182,183,212,214,215],\"5\":[720,721,723,852,854,855,1683,2112,2509,2949,3572,4426,6013,6382,7362,7797,8815,10122,10723,11660,11798,12069]}",
+  )
+}
+
+///|
+test "moc oracle set-08-complement" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 5/1683 2112 2509 2949 3572 4426 6013 6382 7362 7797 8815 10122 10723 11660 11798 12069",
+    limits,
+  )
+  let actual = a.complement(limits)
+  moc_oracle_assert(
+    "set-08-complement",
+    actual,
+    5,
+    [
+      (67108864, 110297088),
+      (110362624, 138412032),
+      (138477568, 164429824),
+      (164495360, 193265664),
+      (193331200, 234094592),
+      (234160128, 290062336),
+      (290127872, 394067968),
+      (394133504, 418250752),
+      (418316288, 482476032),
+      (482541568, 510984192),
+      (511049728, 577699840),
+      (577765376, 663355392),
+      (663420928, 702742528),
+      (702808064, 764149760),
+      (764215296, 773193728),
+      (773259264, 790953984),
+      (791019520, 805306368),
+    ],
+    [
+      20, 21, 23, 26, 28, 30, 31, 32, 34, 35, 36, 37, 38, 41, 42, 43, 45, 47, 48,
+      49, 51, 52, 53, 54, 56, 58, 59, 60, 88, 89, 91, 96, 98, 99, 100, 101, 102,
+      108, 109, 111, 116, 117, 118, 132, 134, 135, 156, 158, 159, 160, 161, 162,
+      176, 177, 178, 184, 186, 187, 200, 202, 203, 220, 221, 223, 228, 229, 230,
+      244, 245, 247, 249, 250, 251, 253, 254, 255, 360, 362, 363, 389, 390, 391,
+      413, 414, 415, 441, 442, 443, 476, 477, 478, 533, 534, 535, 628, 629, 630,
+      652, 653, 655, 717, 718, 719, 740, 741, 742, 804, 805, 807, 889, 890, 891,
+      924, 925, 927, 985, 986, 987, 992, 994, 995, 1008, 1009, 1011, 1445, 1446,
+      1447, 1553, 1554, 1555, 1648, 1649, 1650, 1760, 1762, 1763, 1916, 1918, 1919,
+      2128, 2129, 2131, 2524, 2525, 2526, 2616, 2617, 2618, 2865, 2866, 2867, 2972,
+      2974, 2975, 3224, 3225, 3226, 3552, 3553, 3555, 3705, 3706, 3707, 3936, 3937,
+      3938, 3972, 3974, 3975, 4040, 4042, 4043, 5776, 5777, 5778, 6209, 6210, 6211,
+      6604, 6606, 6607, 7044, 7046, 7047, 7669, 7670, 7671, 8520, 8521, 8523, 10108,
+      10110, 10111, 10476, 10477, 10479, 11456, 11457, 11459, 11892, 11894, 11895,
+      12908, 12909, 12910, 14216, 14217, 14219, 14816, 14817, 14818, 15757, 15758,
+      15759, 15892, 15893, 15895, 16164, 16166, 16167,
+    ],
+    "1/4-5 7 10 12 14-16 18-22 25-27 29 31-33 35-38 40 42-44 2/24-25 27 32 34-38 44-45 47 52-54 68 70-71 92 94-98 112-114 120 122-123 136 138-139 156-157 159 164-166 180-181 183 185-187 189-191 3/104 106-107 133-135 157-159 185-187 220-222 277-279 372-374 396-397 399 461-463 484-486 548-549 551 633-635 668-669 671 729-731 736 738-739 752-753 755 4/421-423 529-531 624-626 736 738-739 892 894-895 1104-1105 1107 1500-1502 1592-1594 1841-1843 1948 1950-1951 2200-2202 2528-2529 2531 2681-2683 2912-2914 2948 2950-2951 3016 3018-3019 5/1680-1682 2113-2115 2508 2510-2511 2948 2950-2951 3573-3575 4424-4425 4427 6012 6014-6015 6380-6381 6383 7360-7361 7363 7796 7798-7799 8812-8814 10120-10121 10123 10720-10722 11661-11663 11796-11797 11799 12068 12070-12071",
+    "{\"1\":[4,5,7,10,12,14,15,16,18,19,20,21,22,25,26,27,29,31,32,33,35,36,37,38,40,42,43,44],\"2\":[24,25,27,32,34,35,36,37,38,44,45,47,52,53,54,68,70,71,92,94,95,96,97,98,112,113,114,120,122,123,136,138,139,156,157,159,164,165,166,180,181,183,185,186,187,189,190,191],\"3\":[104,106,107,133,134,135,157,158,159,185,186,187,220,221,222,277,278,279,372,373,374,396,397,399,461,462,463,484,485,486,548,549,551,633,634,635,668,669,671,729,730,731,736,738,739,752,753,755],\"4\":[421,422,423,529,530,531,624,625,626,736,738,739,892,894,895,1104,1105,1107,1500,1501,1502,1592,1593,1594,1841,1842,1843,1948,1950,1951,2200,2201,2202,2528,2529,2531,2681,2682,2683,2912,2913,2914,2948,2950,2951,3016,3018,3019],\"5\":[1680,1681,1682,2113,2114,2115,2508,2510,2511,2948,2950,2951,3573,3574,3575,4424,4425,4427,6012,6014,6015,6380,6381,6383,7360,7361,7363,7796,7798,7799,8812,8813,8814,10120,10121,10123,10720,10721,10722,11661,11662,11663,11796,11797,11799,12068,12070,12071]}",
+  )
+}
+
+///|
+test "moc oracle set-09-union" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 9/396470 481136 634677 736665 1397189 1400942 1442421 1530187 1669946 1852857 1899529 2439836 2704348 2798314 2864763 3087821",
+    limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 5/2217 2457 2472 2812 2829 3214 3777 4696 5672 7788 8342 8585 9133 11883",
+    limits,
+  )
+  let actual = a.union(b, limits)
+  moc_oracle_assert(
+    "set-09-union",
+    actual,
+    9,
+    [
+      (0, 67108864),
+      (101496320, 101496576),
+      (123170816, 123171072),
+      (145293312, 145358848),
+      (161021952, 161087488),
+      (162004992, 162070528),
+      (162477312, 162477568),
+      (184287232, 184352768),
+      (185401344, 185466880),
+      (188586240, 188586496),
+      (210632704, 210698240),
+      (247529472, 247595008),
+      (307757056, 307822592),
+      (357680384, 357680640),
+      (358641152, 358641408),
+      (369259776, 369260032),
+      (371720192, 371785728),
+      (391727872, 391728128),
+      (427506176, 427506432),
+      (474331392, 474331648),
+      (486279424, 486279680),
+      (510394368, 510459904),
+      (546701312, 546766848),
+      (562626560, 562692096),
+      (598540288, 598605824),
+      (624598016, 624598272),
+      (692313088, 692313344),
+      (716368384, 716368640),
+      (733379328, 733379584),
+      (778764288, 778829824),
+      (790482176, 790482432),
+    ],
+    [
+      4, 6313, 6553, 6568, 6908, 6925, 7310, 7873, 8792, 9768, 11884, 12438, 12681,
+      13229, 15979, 1445046, 1529712, 1683253, 1785241, 2445765, 2449518, 2490997,
+      2578763, 2718522, 2901433, 2948105, 3488412, 3752924, 3846890, 3913339, 4136397,
+    ],
+    "0/0 5/2217 2457 2472 2812 2829 3214 3777 4696 5672 7788 8342 8585 9133 11883 9/396470 481136 634677 736665 1397189 1400942 1442421 1530187 1669946 1852857 1899529 2439836 2704348 2798314 2864763 3087821",
+    "{\"0\":[0],\"5\":[2217,2457,2472,2812,2829,3214,3777,4696,5672,7788,8342,8585,9133,11883],\"9\":[396470,481136,634677,736665,1397189,1400942,1442421,1530187,1669946,1852857,1899529,2439836,2704348,2798314,2864763,3087821]}",
+  )
+}
+
+///|
+test "moc oracle set-09-intersection" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 9/396470 481136 634677 736665 1397189 1400942 1442421 1530187 1669946 1852857 1899529 2439836 2704348 2798314 2864763 3087821",
+    limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 5/2217 2457 2472 2812 2829 3214 3777 4696 5672 7788 8342 8585 9133 11883",
+    limits,
+  )
+  let actual = a.intersection(b, limits)
+  moc_oracle_assert(
+    "set-09-intersection",
+    actual,
+    9,
+    [(0, 33554432)],
+    [16, 17],
+    "1/0-1 9/",
+    "{\"1\":[0,1],\"9\":[]}",
+  )
+}
+
+///|
+test "moc oracle set-09-difference" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 9/396470 481136 634677 736665 1397189 1400942 1442421 1530187 1669946 1852857 1899529 2439836 2704348 2798314 2864763 3087821",
+    limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 5/2217 2457 2472 2812 2829 3214 3777 4696 5672 7788 8342 8585 9133 11883",
+    limits,
+  )
+  let actual = a.difference(b, limits)
+  moc_oracle_assert(
+    "set-09-difference",
+    actual,
+    9,
+    [
+      (33554432, 67108864),
+      (101496320, 101496576),
+      (123170816, 123171072),
+      (162477312, 162477568),
+      (188586240, 188586496),
+      (357680384, 357680640),
+      (358641152, 358641408),
+      (369259776, 369260032),
+      (391727872, 391728128),
+      (427506176, 427506432),
+      (474331392, 474331648),
+      (486279424, 486279680),
+      (624598016, 624598272),
+      (692313088, 692313344),
+      (716368384, 716368640),
+      (733379328, 733379584),
+      (790482176, 790482432),
+    ],
+    [
+      18, 19, 1445046, 1529712, 1683253, 1785241, 2445765, 2449518, 2490997, 2578763,
+      2718522, 2901433, 2948105, 3488412, 3752924, 3846890, 3913339, 4136397,
+    ],
+    "1/2-3 9/396470 481136 634677 736665 1397189 1400942 1442421 1530187 1669946 1852857 1899529 2439836 2704348 2798314 2864763 3087821",
+    "{\"1\":[2,3],\"9\":[396470,481136,634677,736665,1397189,1400942,1442421,1530187,1669946,1852857,1899529,2439836,2704348,2798314,2864763,3087821]}",
+  )
+}
+
+///|
+test "moc oracle set-09-complement" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 9/396470 481136 634677 736665 1397189 1400942 1442421 1530187 1669946 1852857 1899529 2439836 2704348 2798314 2864763 3087821",
+    limits,
+  )
+  let actual = a.complement(limits)
+  moc_oracle_assert(
+    "set-09-complement",
+    actual,
+    9,
+    [
+      (67108864, 101496320),
+      (101496576, 123170816),
+      (123171072, 162477312),
+      (162477568, 188586240),
+      (188586496, 357680384),
+      (357680640, 358641152),
+      (358641408, 369259776),
+      (369260032, 391727872),
+      (391728128, 427506176),
+      (427506432, 474331392),
+      (474331648, 486279424),
+      (486279680, 624598016),
+      (624598272, 692313088),
+      (692313344, 716368384),
+      (716368640, 733379328),
+      (733379584, 790482176),
+      (790482432, 805306368),
+    ],
+    [
+      7, 8, 12, 20, 21, 24, 26, 36, 40, 42, 43, 45, 46, 47, 52, 54, 55, 56, 60, 61,
+      62, 89, 90, 91, 92, 94, 95, 100, 101, 103, 109, 110, 111, 148, 150, 151, 153,
+      154, 155, 156, 158, 159, 164, 166, 167, 176, 178, 213, 214, 215, 228, 230,
+      231, 232, 233, 235, 236, 237, 239, 253, 254, 255, 353, 354, 355, 372, 374,
+      375, 408, 409, 411, 432, 433, 434, 596, 599, 609, 610, 611, 628, 630, 631,
+      660, 661, 662, 709, 710, 711, 716, 717, 718, 848, 849, 850, 917, 918, 919,
+      936, 937, 938, 952, 953, 954, 1008, 1010, 1011, 1408, 1409, 1410, 1492, 1494,
+      1495, 1640, 1641, 1642, 1740, 1741, 1742, 2389, 2390, 2391, 2393, 2394, 2395,
+      2433, 2434, 2435, 2516, 2517, 2519, 2652, 2653, 2655, 2832, 2834, 2835, 2876,
+      2877, 2878, 3404, 3405, 3407, 3665, 3666, 3667, 3757, 3758, 3759, 3820, 3822,
+      3823, 4036, 4037, 4038, 5645, 5646, 5647, 5972, 5973, 5974, 6572, 6573, 6574,
+      6972, 6974, 6975, 9552, 9554, 9555, 9569, 9570, 9571, 9728, 9729, 9731, 10072,
+      10074, 10075, 10616, 10617, 10618, 11332, 11334, 11335, 11517, 11518, 11519,
+      13624, 13625, 13627, 14656, 14657, 14658, 15024, 15025, 15027, 15284, 15285,
+      15287, 16156, 16158, 16159, 22576, 22577, 22579, 23900, 23902, 23903, 26301,
+      26302, 26303, 27892, 27893, 27895, 38212, 38213, 38214, 38272, 38274, 38275,
+      38920, 38922, 38923, 40292, 40294, 40295, 42477, 42478, 42479, 45332, 45333,
+      45335, 46065, 46066, 46067, 54504, 54505, 54507, 58636, 58637, 58638, 60104,
+      60105, 60106, 61144, 61146, 61147, 64628, 64629, 64630, 90312, 90313, 90314,
+      95604, 95605, 95606, 105200, 105201, 105202, 111576, 111578, 111579, 152861,
+      152862, 152863, 153092, 153093, 153095, 155684, 155685, 155686, 161173, 161174,
+      161175, 169904, 169905, 169906, 181336, 181337, 181338, 184257, 184258, 184259,
+      218024, 218026, 218027, 234556, 234558, 234559, 240428, 240429, 240431, 244580,
+      244581, 244582, 258525, 258526, 258527, 361260, 361262, 361263, 382429, 382430,
+      382431, 420812, 420814, 420815, 446308, 446309, 446311, 611440, 611442, 611443,
+      612376, 612377, 612378, 622748, 622750, 622751, 644688, 644689, 644691, 679628,
+      679629, 679631, 725356, 725357, 725359, 737024, 737025, 737027, 872100, 872101,
+      872102, 938228, 938229, 938230, 961720, 961721, 961723, 978332, 978333, 978335,
+      1034096, 1034097, 1034098, 1445044, 1445045, 1445047, 1529713, 1529714, 1529715,
+      1683252, 1683254, 1683255, 1785240, 1785242, 1785243, 2445764, 2445766, 2445767,
+      2449516, 2449517, 2449519, 2490996, 2490998, 2490999, 2578760, 2578761, 2578762,
+      2718520, 2718521, 2718523, 2901432, 2901434, 2901435, 2948104, 2948106, 2948107,
+      3488413, 3488414, 3488415, 3752925, 3752926, 3752927, 3846888, 3846889, 3846891,
+      3913336, 3913337, 3913338, 4136396, 4136398, 4136399,
+    ],
+    "0/3-4 8 1/4-5 8 10 20 24 26-27 29-31 36 38-40 44-46 2/25-28 30-31 36-37 39 45-47 84 86-87 89-92 94-95 100 102-103 112 114 149-151 164 166-169 171-173 175 189-191 3/97-99 116 118-119 152-153 155 176-178 340 343 353-355 372 374-375 404-406 453-455 460-462 592-594 661-663 680-682 696-698 752 754-755 4/384-386 468 470-471 616-618 716-718 1365-1367 1369-1371 1409-1411 1492-1493 1495 1628-1629 1631 1808 1810-1811 1852-1854 2380-2381 2383 2641-2643 2733-2735 2796 2798-2799 3012-3014 5/1549-1551 1876-1878 2476-2478 2876 2878-2879 5456 5458-5459 5473-5475 5632-5633 5635 5976 5978-5979 6520-6522 7236 7238-7239 7421-7423 9528-9529 9531 10560-10562 10928-10929 10931 11188-11189 11191 12060 12062-12063 6/6192-6193 6195 7516 7518-7519 9917-9919 11508-11509 11511 21828-21830 21888 21890-21891 22536 22538-22539 23908 23910-23911 26093-26095 28948-28949 28951 29681-29683 38120-38121 38123 42252-42254 43720-43722 44760 44762-44763 48244-48246 7/24776-24778 30068-30070 39664-39666 46040 46042-46043 87325-87327 87556-87557 87559 90148-90150 95637-95639 104368-104370 115800-115802 118721-118723 152488 152490-152491 169020 169022-169023 174892-174893 174895 179044-179046 192989-192991 8/99116 99118-99119 120285-120287 158668 158670-158671 184164-184165 184167 349296 349298-349299 350232-350234 360604 360606-360607 382544-382545 382547 417484-417485 417487 463212-463213 463215 474880-474881 474883 609956-609958 676084-676086 699576-699577 699579 716188-716189 716191 771952-771954 9/396468-396469 396471 481137-481139 634676 634678-634679 736664 736666-736667 1397188 1397190-1397191 1400940-1400941 1400943 1442420 1442422-1442423 1530184-1530186 1669944-1669945 1669947 1852856 1852858-1852859 1899528 1899530-1899531 2439837-2439839 2704349-2704351 2798312-2798313 2798315 2864760-2864762 3087820 3087822-3087823",
+    "{\"0\":[3,4,8],\"1\":[4,5,8,10,20,24,26,27,29,30,31,36,38,39,40,44,45,46],\"2\":[25,26,27,28,30,31,36,37,39,45,46,47,84,86,87,89,90,91,92,94,95,100,102,103,112,114,149,150,151,164,166,167,168,169,171,172,173,175,189,190,191],\"3\":[97,98,99,116,118,119,152,153,155,176,177,178,340,343,353,354,355,372,374,375,404,405,406,453,454,455,460,461,462,592,593,594,661,662,663,680,681,682,696,697,698,752,754,755],\"4\":[384,385,386,468,470,471,616,617,618,716,717,718,1365,1366,1367,1369,1370,1371,1409,1410,1411,1492,1493,1495,1628,1629,1631,1808,1810,1811,1852,1853,1854,2380,2381,2383,2641,2642,2643,2733,2734,2735,2796,2798,2799,3012,3013,3014],\"5\":[1549,1550,1551,1876,1877,1878,2476,2477,2478,2876,2878,2879,5456,5458,5459,5473,5474,5475,5632,5633,5635,5976,5978,5979,6520,6521,6522,7236,7238,7239,7421,7422,7423,9528,9529,9531,10560,10561,10562,10928,10929,10931,11188,11189,11191,12060,12062,12063],\"6\":[6192,6193,6195,7516,7518,7519,9917,9918,9919,11508,11509,11511,21828,21829,21830,21888,21890,21891,22536,22538,22539,23908,23910,23911,26093,26094,26095,28948,28949,28951,29681,29682,29683,38120,38121,38123,42252,42253,42254,43720,43721,43722,44760,44762,44763,48244,48245,48246],\"7\":[24776,24777,24778,30068,30069,30070,39664,39665,39666,46040,46042,46043,87325,87326,87327,87556,87557,87559,90148,90149,90150,95637,95638,95639,104368,104369,104370,115800,115801,115802,118721,118722,118723,152488,152490,152491,169020,169022,169023,174892,174893,174895,179044,179045,179046,192989,192990,192991],\"8\":[99116,99118,99119,120285,120286,120287,158668,158670,158671,184164,184165,184167,349296,349298,349299,350232,350233,350234,360604,360606,360607,382544,382545,382547,417484,417485,417487,463212,463213,463215,474880,474881,474883,609956,609957,609958,676084,676085,676086,699576,699577,699579,716188,716189,716191,771952,771953,771954],\"9\":[396468,396469,396471,481137,481138,481139,634676,634678,634679,736664,736666,736667,1397188,1397190,1397191,1400940,1400941,1400943,1442420,1442422,1442423,1530184,1530185,1530186,1669944,1669945,1669947,1852856,1852858,1852859,1899528,1899530,1899531,2439837,2439838,2439839,2704349,2704350,2704351,2798312,2798313,2798315,2864760,2864761,2864762,3087820,3087822,3087823]}",
+  )
+}
+
+///|
+test "moc oracle set-10-union" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 4/259 279 563 684 729 912 975 1494 1741 1812 1889 2169 3022", limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 10/1888474 2872109 6829777 7020787 7092406 7897237 8095500 8768490 9265222 9284683 10095013 10360056 11111036 11496132 11825757",
+    limits,
+  )
+  let actual = a.union(b, limits)
+  moc_oracle_assert(
+    "set-10-union",
+    actual,
+    10,
+    [
+      (0, 67108864),
+      (67895296, 68157440),
+      (73138176, 73400320),
+      (120862336, 120862400),
+      (147587072, 147849216),
+      (179306496, 179568640),
+      (183814976, 183815040),
+      (191102976, 191365120),
+      (239075328, 239337472),
+      (255590400, 255852544),
+      (391643136, 391905280),
+      (437105728, 437105792),
+      (449330368, 449330432),
+      (453913984, 453914048),
+      (456392704, 456654848),
+      (475004928, 475267072),
+      (495190016, 495452160),
+      (505423168, 505423232),
+      (518112000, 518112064),
+      (561183360, 561183424),
+      (568590336, 568852480),
+      (592974208, 592974272),
+      (594219712, 594219776),
+      (646080832, 646080896),
+      (663043584, 663043648),
+      (711106304, 711106368),
+      (735752448, 735752512),
+      (756848448, 756848512),
+      (792199168, 792461312),
+    ],
+    [
+      4, 1283, 1303, 1587, 1708, 1753, 1936, 1999, 2518, 2765, 2836, 2913, 3193,
+      4046, 6082778, 7066413, 11024081, 11215091, 11286710, 12091541, 12289804, 12962794,
+      13459526, 13478987, 14289317, 14554360, 15305340, 15690436, 16020061,
+    ],
+    "0/0 4/259 279 563 684 729 912 975 1494 1741 1812 1889 2169 3022 10/1888474 2872109 6829777 7020787 7092406 7897237 8095500 8768490 9265222 9284683 10095013 10360056 11111036 11496132 11825757",
+    "{\"0\":[0],\"4\":[259,279,563,684,729,912,975,1494,1741,1812,1889,2169,3022],\"10\":[1888474,2872109,6829777,7020787,7092406,7897237,8095500,8768490,9265222,9284683,10095013,10360056,11111036,11496132,11825757]}",
+  )
+}
+
+///|
+test "moc oracle set-10-intersection" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 4/259 279 563 684 729 912 975 1494 1741 1812 1889 2169 3022", limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 10/1888474 2872109 6829777 7020787 7092406 7897237 8095500 8768490 9265222 9284683 10095013 10360056 11111036 11496132 11825757",
+    limits,
+  )
+  let actual = a.intersection(b, limits)
+  moc_oracle_assert(
+    "set-10-intersection",
+    actual,
+    10,
+    [(0, 33554432)],
+    [16, 17],
+    "1/0-1 10/",
+    "{\"1\":[0,1],\"10\":[]}",
+  )
+}
+
+///|
+test "moc oracle set-10-difference" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 4/259 279 563 684 729 912 975 1494 1741 1812 1889 2169 3022", limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 10/1888474 2872109 6829777 7020787 7092406 7897237 8095500 8768490 9265222 9284683 10095013 10360056 11111036 11496132 11825757",
+    limits,
+  )
+  let actual = a.difference(b, limits)
+  moc_oracle_assert(
+    "set-10-difference",
+    actual,
+    10,
+    [
+      (33554432, 67108864),
+      (67895296, 68157440),
+      (73138176, 73400320),
+      (147587072, 147849216),
+      (179306496, 179568640),
+      (191102976, 191365120),
+      (239075328, 239337472),
+      (255590400, 255852544),
+      (391643136, 391905280),
+      (456392704, 456654848),
+      (475004928, 475267072),
+      (495190016, 495452160),
+      (568590336, 568852480),
+      (792199168, 792461312),
+    ],
+    [
+      18, 19, 1283, 1303, 1587, 1708, 1753, 1936, 1999, 2518, 2765, 2836, 2913, 3193,
+      4046,
+    ],
+    "1/2-3 4/259 279 563 684 729 912 975 1494 1741 1812 1889 2169 3022 10/",
+    "{\"1\":[2,3],\"4\":[259,279,563,684,729,912,975,1494,1741,1812,1889,2169,3022],\"10\":[]}",
+  )
+}
+
+///|
+test "moc oracle set-10-complement" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 4/259 279 563 684 729 912 975 1494 1741 1812 1889 2169 3022", limits,
+  )
+  let actual = a.complement(limits)
+  moc_oracle_assert(
+    "set-10-complement",
+    actual,
+    4,
+    [
+      (67108864, 67895296),
+      (68157440, 73138176),
+      (73400320, 147587072),
+      (147849216, 179306496),
+      (179568640, 191102976),
+      (191365120, 239075328),
+      (239337472, 255590400),
+      (255852544, 391643136),
+      (391905280, 456392704),
+      (456654848, 475004928),
+      (475267072, 495190016),
+      (495452160, 568590336),
+      (568852480, 792199168),
+      (792461312, 805306368),
+    ],
+    [
+      8, 13, 14, 21, 22, 23, 25, 28, 29, 36, 37, 38, 40, 41, 42, 46, 47, 48, 50,
+      51, 60, 61, 62, 82, 83, 96, 97, 98, 104, 105, 107, 108, 110, 111, 120, 122,
+      123, 125, 126, 127, 156, 158, 159, 173, 174, 175, 176, 178, 179, 180, 181,
+      183, 196, 197, 198, 253, 254, 255, 321, 322, 323, 324, 326, 327, 397, 398,
+      399, 424, 425, 426, 436, 437, 439, 485, 486, 487, 496, 497, 498, 628, 630,
+      631, 688, 689, 690, 708, 710, 711, 729, 730, 731, 796, 797, 799, 1008, 1009,
+      1010, 1280, 1281, 1282, 1300, 1301, 1302, 1584, 1585, 1586, 1709, 1710, 1711,
+      1752, 1754, 1755, 1937, 1938, 1939, 1996, 1997, 1998, 2516, 2517, 2519, 2764,
+      2766, 2767, 2837, 2838, 2839, 2912, 2914, 2915, 3192, 3194, 3195, 4044, 4045,
+      4047,
+    ],
+    "0/4 9-10 1/5-7 9 12-13 20-22 24-26 30-32 34-35 44-46 2/18-19 32-34 40-41 43-44 46-47 56 58-59 61-63 92 94-95 109-112 114-117 119 132-134 189-191 3/65-68 70-71 141-143 168-170 180-181 183 229-231 240-242 372 374-375 432-434 452 454-455 473-475 540-541 543 752-754 4/256-258 276-278 560-562 685-687 728 730-731 913-915 972-974 1492-1493 1495 1740 1742-1743 1813-1815 1888 1890-1891 2168 2170-2171 3020-3021 3023",
+    "{\"0\":[4,9,10],\"1\":[5,6,7,9,12,13,20,21,22,24,25,26,30,31,32,34,35,44,45,46],\"2\":[18,19,32,33,34,40,41,43,44,46,47,56,58,59,61,62,63,92,94,95,109,110,111,112,114,115,116,117,119,132,133,134,189,190,191],\"3\":[65,66,67,68,70,71,141,142,143,168,169,170,180,181,183,229,230,231,240,241,242,372,374,375,432,433,434,452,454,455,473,474,475,540,541,543,752,753,754],\"4\":[256,257,258,276,277,278,560,561,562,685,686,687,728,730,731,913,914,915,972,973,974,1492,1493,1495,1740,1742,1743,1813,1814,1815,1888,1890,1891,2168,2170,2171,3020,3021,3023]}",
+  )
+}
+
+///|
+test "moc oracle set-11-union" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 11/4524433 5658060 6743213 13012745 15944580 20792154 22191418 24932227 37215740 43416928 45143717 46977704 48817509",
+    limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 8/125839 126956 140027 140055 172840 245970 249676 288015 390730 423356 473791 558321 595159 598111 615381 779321",
+    limits,
+  )
+  let actual = a.union(b, limits)
+  moc_oracle_assert(
+    "set-11-union",
+    actual,
+    11,
+    [
+      (0, 67108864),
+      (72390928, 72390944),
+      (90528960, 90528976),
+      (107891408, 107891424),
+      (128859136, 128860160),
+      (130002944, 130003968),
+      (143387648, 143388672),
+      (143416320, 143417344),
+      (176988160, 176989184),
+      (208203920, 208203936),
+      (251873280, 251874304),
+      (255113280, 255113296),
+      (255668224, 255669248),
+      (294927360, 294928384),
+      (332674464, 332674480),
+      (355062688, 355062704),
+      (398915632, 398915648),
+      (400107520, 400108544),
+      (433516544, 433517568),
+      (485161984, 485163008),
+      (571720704, 571721728),
+      (595451840, 595451856),
+      (609442816, 609443840),
+      (612465664, 612466688),
+      (630150144, 630151168),
+      (694670848, 694670864),
+      (722299472, 722299488),
+      (751643264, 751643280),
+      (781080144, 781080160),
+      (798024704, 798025728),
+    ],
+    [
+      4, 387983, 389100, 402171, 402199, 434984, 508114, 511820, 550159, 652874,
+      685500, 735935, 820465, 857303, 860255, 877525, 1041465, 21301649, 22435276,
+      23520429, 29789961, 32721796, 37569370, 38968634, 41709443, 53992956, 60194144,
+      61920933, 63754920, 65594725,
+    ],
+    "0/0 8/125839 126956 140027 140055 172840 245970 249676 288015 390730 423356 473791 558321 595159 598111 615381 779321 11/4524433 5658060 6743213 13012745 15944580 20792154 22191418 24932227 37215740 43416928 45143717 46977704 48817509",
+    "{\"0\":[0],\"8\":[125839,126956,140027,140055,172840,245970,249676,288015,390730,423356,473791,558321,595159,598111,615381,779321],\"11\":[4524433,5658060,6743213,13012745,15944580,20792154,22191418,24932227,37215740,43416928,45143717,46977704,48817509]}",
+  )
+}
+
+///|
+test "moc oracle set-11-intersection" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 11/4524433 5658060 6743213 13012745 15944580 20792154 22191418 24932227 37215740 43416928 45143717 46977704 48817509",
+    limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 8/125839 126956 140027 140055 172840 245970 249676 288015 390730 423356 473791 558321 595159 598111 615381 779321",
+    limits,
+  )
+  let actual = a.intersection(b, limits)
+  moc_oracle_assert(
+    "set-11-intersection",
+    actual,
+    11,
+    [(0, 33554432)],
+    [16, 17],
+    "1/0-1 11/",
+    "{\"1\":[0,1],\"11\":[]}",
+  )
+}
+
+///|
+test "moc oracle set-11-difference" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 11/4524433 5658060 6743213 13012745 15944580 20792154 22191418 24932227 37215740 43416928 45143717 46977704 48817509",
+    limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 8/125839 126956 140027 140055 172840 245970 249676 288015 390730 423356 473791 558321 595159 598111 615381 779321",
+    limits,
+  )
+  let actual = a.difference(b, limits)
+  moc_oracle_assert(
+    "set-11-difference",
+    actual,
+    11,
+    [
+      (33554432, 67108864),
+      (72390928, 72390944),
+      (90528960, 90528976),
+      (107891408, 107891424),
+      (208203920, 208203936),
+      (255113280, 255113296),
+      (332674464, 332674480),
+      (355062688, 355062704),
+      (398915632, 398915648),
+      (595451840, 595451856),
+      (694670848, 694670864),
+      (722299472, 722299488),
+      (751643264, 751643280),
+      (781080144, 781080160),
+    ],
+    [
+      18, 19, 21301649, 22435276, 23520429, 29789961, 32721796, 37569370, 38968634,
+      41709443, 53992956, 60194144, 61920933, 63754920, 65594725,
+    ],
+    "1/2-3 11/4524433 5658060 6743213 13012745 15944580 20792154 22191418 24932227 37215740 43416928 45143717 46977704 48817509",
+    "{\"1\":[2,3],\"11\":[4524433,5658060,6743213,13012745,15944580,20792154,22191418,24932227,37215740,43416928,45143717,46977704,48817509]}",
+  )
+}
+
+///|
+test "moc oracle set-11-complement" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 11/4524433 5658060 6743213 13012745 15944580 20792154 22191418 24932227 37215740 43416928 45143717 46977704 48817509",
+    limits,
+  )
+  let actual = a.complement(limits)
+  moc_oracle_assert(
+    "set-11-complement",
+    actual,
+    11,
+    [
+      (67108864, 72390928),
+      (72390944, 90528960),
+      (90528976, 107891408),
+      (107891424, 208203920),
+      (208203936, 255113280),
+      (255113296, 332674464),
+      (332674480, 355062688),
+      (355062704, 398915632),
+      (398915648, 595451840),
+      (595451856, 694670848),
+      (694670864, 722299472),
+      (722299488, 751643264),
+      (751643280, 781080144),
+      (781080160, 805306368),
+    ],
+    [
+      6, 10, 11, 13, 23, 29, 30, 32, 33, 34, 36, 38, 48, 49, 50, 56, 58, 61, 63,
+      80, 82, 83, 84, 86, 87, 88, 90, 91, 112, 114, 115, 125, 126, 127, 140, 141,
+      142, 149, 150, 151, 156, 157, 158, 204, 206, 207, 228, 230, 231, 237, 238,
+      239, 240, 241, 242, 248, 249, 251, 324, 326, 327, 340, 341, 343, 356, 357,
+      359, 452, 453, 455, 496, 497, 498, 572, 574, 575, 592, 593, 595, 637, 638,
+      639, 820, 821, 822, 916, 917, 919, 945, 946, 947, 973, 974, 975, 1001, 1002,
+      1003, 1301, 1302, 1303, 1368, 1370, 1371, 1432, 1433, 1434, 1816, 1817, 1819,
+      1996, 1998, 1999, 2292, 2294, 2295, 2376, 2377, 2379, 2544, 2546, 2547, 3292,
+      3293, 3294, 3672, 3674, 3675, 3776, 3777, 3778, 3888, 3889, 3890, 4000, 4001,
+      4002, 5201, 5202, 5203, 5476, 5478, 5479, 5740, 5741, 5743, 7273, 7274, 7275,
+      7989, 7990, 7991, 9173, 9174, 9175, 9512, 9514, 9515, 10180, 10181, 10183,
+      13180, 13182, 13183, 14692, 14693, 14694, 15116, 15118, 15119, 15564, 15566,
+      15567, 16012, 16013, 16015, 20800, 20801, 20803, 21908, 21910, 21911, 22968,
+      22970, 22971, 29088, 29089, 29090, 31952, 31953, 31955, 36689, 36690, 36691,
+      38052, 38053, 38054, 40728, 40729, 40730, 52724, 52725, 52726, 58780, 58781,
+      58782, 60468, 60470, 60471, 62261, 62262, 62263, 64056, 64058, 64059, 83208,
+      83210, 83211, 87636, 87638, 87639, 91877, 91878, 91879, 116364, 116365, 116366,
+      127816, 127817, 127818, 146752, 146753, 146754, 152220, 152222, 152223, 162924,
+      162925, 162926, 210908, 210910, 210911, 235132, 235134, 235135, 241876, 241877,
+      241879, 249040, 249041, 249043, 256228, 256230, 256231, 332836, 332837, 332839,
+      350548, 350549, 350550, 367504, 367505, 367507, 465469, 465470, 465471, 511276,
+      511277, 511279, 587020, 587022, 587023, 608885, 608886, 608887, 651708, 651709,
+      651711, 843636, 843637, 843638, 940532, 940534, 940535, 967512, 967513, 967515,
+      996168, 996169, 996171, 1024916, 1024918, 1024919, 1331352, 1331354, 1331355,
+      1402205, 1402206, 1402207, 1470024, 1470025, 1470027, 1861873, 1861874, 1861875,
+      2045113, 2045114, 2045115, 2348084, 2348086, 2348087, 2435536, 2435537, 2435538,
+      2606841, 2606842, 2606843, 3374556, 3374557, 3374558, 3762132, 3762133, 3762135,
+      3870056, 3870057, 3870059, 3984680, 3984681, 3984683, 4099668, 4099669, 4099671,
+      5325413, 5325414, 5325415, 5608816, 5608817, 5608818, 5880104, 5880105, 5880106,
+      7447488, 7447489, 7447491, 8180448, 8180450, 8180451, 9392340, 9392341, 9392343,
+      9742156, 9742157, 9742159, 10427361, 10427362, 10427363, 13498236, 13498237,
+      13498238, 15048537, 15048538, 15048539, 15480232, 15480234, 15480235, 15938728,
+      15938729, 15938731, 16398680, 16398682, 16398683, 21301648, 21301650, 21301651,
+      22435277, 22435278, 22435279, 23520428, 23520430, 23520431, 29789960, 29789962,
+      29789963, 32721797, 32721798, 32721799, 37569368, 37569369, 37569371, 38968632,
+      38968633, 38968635, 41709440, 41709441, 41709442, 53992957, 53992958, 53992959,
+      60194145, 60194146, 60194147, 61920932, 61920934, 61920935, 63754921, 63754922,
+      63754923, 65594724, 65594726, 65594727,
+    ],
+    "0/2 6-7 9 1/7 13-14 16-18 20 22 32-34 40 42 45 47 2/16 18-20 22-24 26-27 48 50-51 61-63 76-78 85-87 92-94 140 142-143 164 166-167 173-178 184-185 187 3/68 70-71 84-85 87 100-101 103 196-197 199 240-242 316 318-319 336-337 339 381-383 564-566 660-661 663 689-691 717-719 745-747 4/277-279 344 346-347 408-410 792-793 795 972 974-975 1268 1270-1271 1352-1353 1355 1520 1522-1523 2268-2270 2648 2650-2651 2752-2754 2864-2866 2976-2978 5/1105-1107 1380 1382-1383 1644-1645 1647 3177-3179 3893-3895 5077-5079 5416 5418-5419 6084-6085 6087 9084 9086-9087 10596-10598 11020 11022-11023 11468 11470-11471 11916-11917 11919 6/4416-4417 4419 5524 5526-5527 6584 6586-6587 12704-12706 15568-15569 15571 20305-20307 21668-21670 24344-24346 36340-36342 42396-42398 44084 44086-44087 45877-45879 47672 47674-47675 7/17672 17674-17675 22100 22102-22103 26341-26343 50828-50830 62280-62282 81216-81218 86684 86686-86687 97388-97390 145372 145374-145375 169596 169598-169599 176340-176341 176343 183504-183505 183507 190692 190694-190695 8/70692-70693 70695 88404-88406 105360-105361 105363 203325-203327 249132-249133 249135 324876 324878-324879 346741-346743 389564-389565 389567 581492-581494 678388 678390-678391 705368-705369 705371 734024-734025 734027 762772 762774-762775 9/282776 282778-282779 353629-353631 421448-421449 421451 813297-813299 996537-996539 1299508 1299510-1299511 1386960-1386962 1558265-1558267 2325980-2325982 2713556-2713557 2713559 2821480-2821481 2821483 2936104-2936105 2936107 3051092-3051093 3051095 10/1131109-1131111 1414512-1414514 1685800-1685802 3253184-3253185 3253187 3986144 3986146-3986147 5198036-5198037 5198039 5547852-5547853 5547855 6233057-6233059 9303932-9303934 10854233-10854235 11285928 11285930-11285931 11744424-11744425 11744427 12204376 12204378-12204379 11/4524432 4524434-4524435 5658061-5658063 6743212 6743214-6743215 13012744 13012746-13012747 15944581-15944583 20792152-20792153 20792155 22191416-22191417 22191419 24932224-24932226 37215741-37215743 43416929-43416931 45143716 45143718-45143719 46977705-46977707 48817508 48817510-48817511",
+    "{\"0\":[2,6,7,9],\"1\":[7,13,14,16,17,18,20,22,32,33,34,40,42,45,47],\"2\":[16,18,19,20,22,23,24,26,27,48,50,51,61,62,63,76,77,78,85,86,87,92,93,94,140,142,143,164,166,167,173,174,175,176,177,178,184,185,187],\"3\":[68,70,71,84,85,87,100,101,103,196,197,199,240,241,242,316,318,319,336,337,339,381,382,383,564,565,566,660,661,663,689,690,691,717,718,719,745,746,747],\"4\":[277,278,279,344,346,347,408,409,410,792,793,795,972,974,975,1268,1270,1271,1352,1353,1355,1520,1522,1523,2268,2269,2270,2648,2650,2651,2752,2753,2754,2864,2865,2866,2976,2977,2978],\"5\":[1105,1106,1107,1380,1382,1383,1644,1645,1647,3177,3178,3179,3893,3894,3895,5077,5078,5079,5416,5418,5419,6084,6085,6087,9084,9086,9087,10596,10597,10598,11020,11022,11023,11468,11470,11471,11916,11917,11919],\"6\":[4416,4417,4419,5524,5526,5527,6584,6586,6587,12704,12705,12706,15568,15569,15571,20305,20306,20307,21668,21669,21670,24344,24345,24346,36340,36341,36342,42396,42397,42398,44084,44086,44087,45877,45878,45879,47672,47674,47675],\"7\":[17672,17674,17675,22100,22102,22103,26341,26342,26343,50828,50829,50830,62280,62281,62282,81216,81217,81218,86684,86686,86687,97388,97389,97390,145372,145374,145375,169596,169598,169599,176340,176341,176343,183504,183505,183507,190692,190694,190695],\"8\":[70692,70693,70695,88404,88405,88406,105360,105361,105363,203325,203326,203327,249132,249133,249135,324876,324878,324879,346741,346742,346743,389564,389565,389567,581492,581493,581494,678388,678390,678391,705368,705369,705371,734024,734025,734027,762772,762774,762775],\"9\":[282776,282778,282779,353629,353630,353631,421448,421449,421451,813297,813298,813299,996537,996538,996539,1299508,1299510,1299511,1386960,1386961,1386962,1558265,1558266,1558267,2325980,2325981,2325982,2713556,2713557,2713559,2821480,2821481,2821483,2936104,2936105,2936107,3051092,3051093,3051095],\"10\":[1131109,1131110,1131111,1414512,1414513,1414514,1685800,1685801,1685802,3253184,3253185,3253187,3986144,3986146,3986147,5198036,5198037,5198039,5547852,5547853,5547855,6233057,6233058,6233059,9303932,9303933,9303934,10854233,10854234,10854235,11285928,11285930,11285931,11744424,11744425,11744427,12204376,12204378,12204379],\"11\":[4524432,4524434,4524435,5658061,5658062,5658063,6743212,6743214,6743215,13012744,13012746,13012747,15944581,15944582,15944583,20792152,20792153,20792155,22191416,22191417,22191419,24932224,24932225,24932226,37215741,37215742,37215743,43416929,43416930,43416931,45143716,45143718,45143719,46977705,46977706,46977707,48817508,48817510,48817511]}",
+  )
+}
+
+///|
+test "moc oracle set-12-union" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 8/68447 142784 162374 168438 199588 210318 232815 291354 448581 471930 530468 646335 648072 652152 769988",
+    limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 9/265902 313756 372573 630056 670102 674635 1108959 1154157 1415179 1452236 1460606 1671174 1693468 2677697 3048872",
+    limits,
+  )
+  let actual = a.union(b, limits)
+  moc_oracle_assert(
+    "set-12-union",
+    actual,
+    9,
+    [
+      (0, 67108864),
+      (68070912, 68071168),
+      (70089728, 70090752),
+      (80321536, 80321792),
+      (95378688, 95378944),
+      (146210816, 146211840),
+      (161294336, 161294592),
+      (166270976, 166272000),
+      (171546112, 171546368),
+      (172480512, 172481536),
+      (172706560, 172706816),
+      (204378112, 204379136),
+      (215365632, 215366656),
+      (238402560, 238403584),
+      (283893504, 283893760),
+      (295464192, 295464448),
+      (298346496, 298347520),
+      (362285824, 362286080),
+      (371772416, 371772672),
+      (373915136, 373915392),
+      (427820544, 427820800),
+      (433527808, 433528064),
+      (459346944, 459347968),
+      (483256320, 483257344),
+      (543199232, 543200256),
+      (661847040, 661848064),
+      (663625728, 663626752),
+      (667803648, 667804672),
+      (685490432, 685490688),
+      (780511232, 780511488),
+      (788467712, 788468736),
+    ],
+    [
+      4, 330591, 404928, 424518, 430582, 461732, 472462, 494959, 553498, 710725,
+      734074, 792612, 908479, 910216, 914296, 1032132, 1314478, 1362332, 1421149,
+      1678632, 1718678, 1723211, 2157535, 2202733, 2463755, 2500812, 2509182, 2719750,
+      2742044, 3726273, 4097448,
+    ],
+    "0/0 8/68447 142784 162374 168438 199588 210318 232815 291354 448581 471930 530468 646335 648072 652152 769988 9/265902 313756 372573 630056 670102 674635 1108959 1154157 1415179 1452236 1460606 1671174 1693468 2677697 3048872",
+    "{\"0\":[0],\"8\":[68447,142784,162374,168438,199588,210318,232815,291354,448581,471930,530468,646335,648072,652152,769988],\"9\":[265902,313756,372573,630056,670102,674635,1108959,1154157,1415179,1452236,1460606,1671174,1693468,2677697,3048872]}",
+  )
+}
+
+///|
+test "moc oracle set-12-intersection" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 8/68447 142784 162374 168438 199588 210318 232815 291354 448581 471930 530468 646335 648072 652152 769988",
+    limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 9/265902 313756 372573 630056 670102 674635 1108959 1154157 1415179 1452236 1460606 1671174 1693468 2677697 3048872",
+    limits,
+  )
+  let actual = a.intersection(b, limits)
+  moc_oracle_assert(
+    "set-12-intersection",
+    actual,
+    9,
+    [(0, 33554432)],
+    [16, 17],
+    "1/0-1 9/",
+    "{\"1\":[0,1],\"9\":[]}",
+  )
+}
+
+///|
+test "moc oracle set-12-difference" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 8/68447 142784 162374 168438 199588 210318 232815 291354 448581 471930 530468 646335 648072 652152 769988",
+    limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 9/265902 313756 372573 630056 670102 674635 1108959 1154157 1415179 1452236 1460606 1671174 1693468 2677697 3048872",
+    limits,
+  )
+  let actual = a.difference(b, limits)
+  moc_oracle_assert(
+    "set-12-difference",
+    actual,
+    9,
+    [
+      (33554432, 67108864),
+      (70089728, 70090752),
+      (146210816, 146211840),
+      (166270976, 166272000),
+      (172480512, 172481536),
+      (204378112, 204379136),
+      (215365632, 215366656),
+      (238402560, 238403584),
+      (298346496, 298347520),
+      (459346944, 459347968),
+      (483256320, 483257344),
+      (543199232, 543200256),
+      (661847040, 661848064),
+      (663625728, 663626752),
+      (667803648, 667804672),
+      (788467712, 788468736),
+    ],
+    [
+      18, 19, 330591, 404928, 424518, 430582, 461732, 472462, 494959, 553498, 710725,
+      734074, 792612, 908479, 910216, 914296, 1032132,
+    ],
+    "1/2-3 8/68447 142784 162374 168438 199588 210318 232815 291354 448581 471930 530468 646335 648072 652152 769988 9/",
+    "{\"1\":[2,3],\"8\":[68447,142784,162374,168438,199588,210318,232815,291354,448581,471930,530468,646335,648072,652152,769988],\"9\":[]}",
+  )
+}
+
+///|
+test "moc oracle set-12-complement" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 8/68447 142784 162374 168438 199588 210318 232815 291354 448581 471930 530468 646335 648072 652152 769988",
+    limits,
+  )
+  let actual = a.complement(limits)
+  moc_oracle_assert(
+    "set-12-complement",
+    actual,
+    8,
+    [
+      (67108864, 70089728),
+      (70090752, 146210816),
+      (146211840, 166270976),
+      (166272000, 172480512),
+      (172481536, 204378112),
+      (204379136, 215365632),
+      (215366656, 238402560),
+      (238403584, 298346496),
+      (298347520, 459346944),
+      (459347968, 483256320),
+      (483257344, 543199232),
+      (543200256, 661847040),
+      (661848064, 663625728),
+      (663626752, 667803648),
+      (667804672, 788467712),
+      (788468736, 805306368),
+    ],
+    [
+      9, 14, 21, 22, 23, 27, 29, 31, 32, 34, 35, 40, 41, 42, 45, 46, 47, 49, 50,
+      51, 52, 53, 54, 60, 61, 63, 81, 82, 83, 96, 97, 99, 100, 101, 102, 104, 106,
+      107, 113, 114, 121, 122, 123, 132, 133, 134, 172, 174, 175, 176, 177, 178,
+      192, 194, 195, 220, 248, 249, 250, 320, 321, 323, 392, 393, 394, 412, 413,
+      415, 421, 422, 423, 448, 449, 451, 460, 462, 463, 480, 481, 482, 541, 542,
+      543, 692, 693, 695, 717, 718, 719, 772, 773, 775, 884, 885, 886, 889, 890,
+      891, 893, 894, 895, 1004, 1005, 1006, 1288, 1289, 1290, 1580, 1582, 1583, 1656,
+      1657, 1659, 1680, 1682, 1683, 1800, 1801, 1802, 1844, 1846, 1847, 1932, 1934,
+      1935, 2160, 2161, 2163, 2777, 2778, 2779, 2864, 2865, 2866, 3097, 3098, 3099,
+      3549, 3550, 3551, 3552, 3553, 3554, 3568, 3569, 3570, 4028, 4029, 4030, 5164,
+      5166, 5167, 6324, 6325, 6326, 6632, 6634, 6635, 6724, 6725, 6726, 7212, 7213,
+      7215, 7380, 7381, 7383, 7732, 7734, 7735, 8649, 8650, 8651, 11104, 11106, 11107,
+      11468, 11470, 11471, 12385, 12386, 12387, 14192, 14193, 14195, 14220, 14221,
+      14223, 14284, 14286, 14287, 16124, 16125, 16126, 20660, 20662, 20663, 25309,
+      25310, 25311, 26533, 26534, 26535, 26908, 26909, 26910, 28856, 28857, 28859,
+      29529, 29530, 29531, 30932, 30933, 30935, 34592, 34594, 34595, 44421, 44422,
+      44423, 45876, 45877, 45878, 49536, 49537, 49539, 56776, 56777, 56778, 56889,
+      56890, 56891, 57140, 57141, 57142, 64509, 64510, 64511, 82644, 82645, 82646,
+      101233, 101234, 101235, 106128, 106130, 106131, 107644, 107646, 107647, 115432,
+      115434, 115435, 118112, 118113, 118114, 123736, 123737, 123738, 138372, 138373,
+      138375, 177680, 177682, 177683, 183516, 183517, 183519, 198152, 198154, 198155,
+      227116, 227117, 227118, 227552, 227553, 227555, 228572, 228573, 228575, 258032,
+      258034, 258035, 330588, 330589, 330590, 404929, 404930, 404931, 424516, 424517,
+      424519, 430580, 430581, 430583, 461733, 461734, 461735, 472460, 472461, 472463,
+      494956, 494957, 494958, 553496, 553497, 553499, 710724, 710726, 710727, 734072,
+      734073, 734075, 792613, 792614, 792615, 908476, 908477, 908478, 910217, 910218,
+      910219, 914297, 914298, 914299, 1032133, 1032134, 1032135,
+    ],
+    "0/5 10 1/5-7 11 13 15-16 18-19 24-26 29-31 33-38 44-45 47 2/17-19 32-33 35-38 40 42-43 49-50 57-59 68-70 108 110-114 128 130-131 156 184-186 3/64-65 67 136-138 156-157 159 165-167 192-193 195 204 206-207 224-226 285-287 436-437 439 461-463 516-517 519 628-630 633-635 637-639 748-750 4/264-266 556 558-559 632-633 635 656 658-659 776-778 820 822-823 908 910-911 1136-1137 1139 1753-1755 1840-1842 2073-2075 2525-2530 2544-2546 3004-3006 5/1068 1070-1071 2228-2230 2536 2538-2539 2628-2630 3116-3117 3119 3284-3285 3287 3636 3638-3639 4553-4555 7008 7010-7011 7372 7374-7375 8289-8291 10096-10097 10099 10124-10125 10127 10188 10190-10191 12028-12030 6/4276 4278-4279 8925-8927 10149-10151 10524-10526 12472-12473 12475 13145-13147 14548-14549 14551 18208 18210-18211 28037-28039 29492-29494 33152-33153 33155 40392-40394 40505-40507 40756-40758 48125-48127 7/17108-17110 35697-35699 40592 40594-40595 42108 42110-42111 49896 49898-49899 52576-52578 58200-58202 72836-72837 72839 112144 112146-112147 117980-117981 117983 132616 132618-132619 161580-161582 162016-162017 162019 163036-163037 163039 192496 192498-192499 8/68444-68446 142785-142787 162372-162373 162375 168436-168437 168439 199589-199591 210316-210317 210319 232812-232814 291352-291353 291355 448580 448582-448583 471928-471929 471931 530469-530471 646332-646334 648073-648075 652153-652155 769989-769991",
+    "{\"0\":[5,10],\"1\":[5,6,7,11,13,15,16,18,19,24,25,26,29,30,31,33,34,35,36,37,38,44,45,47],\"2\":[17,18,19,32,33,35,36,37,38,40,42,43,49,50,57,58,59,68,69,70,108,110,111,112,113,114,128,130,131,156,184,185,186],\"3\":[64,65,67,136,137,138,156,157,159,165,166,167,192,193,195,204,206,207,224,225,226,285,286,287,436,437,439,461,462,463,516,517,519,628,629,630,633,634,635,637,638,639,748,749,750],\"4\":[264,265,266,556,558,559,632,633,635,656,658,659,776,777,778,820,822,823,908,910,911,1136,1137,1139,1753,1754,1755,1840,1841,1842,2073,2074,2075,2525,2526,2527,2528,2529,2530,2544,2545,2546,3004,3005,3006],\"5\":[1068,1070,1071,2228,2229,2230,2536,2538,2539,2628,2629,2630,3116,3117,3119,3284,3285,3287,3636,3638,3639,4553,4554,4555,7008,7010,7011,7372,7374,7375,8289,8290,8291,10096,10097,10099,10124,10125,10127,10188,10190,10191,12028,12029,12030],\"6\":[4276,4278,4279,8925,8926,8927,10149,10150,10151,10524,10525,10526,12472,12473,12475,13145,13146,13147,14548,14549,14551,18208,18210,18211,28037,28038,28039,29492,29493,29494,33152,33153,33155,40392,40393,40394,40505,40506,40507,40756,40757,40758,48125,48126,48127],\"7\":[17108,17109,17110,35697,35698,35699,40592,40594,40595,42108,42110,42111,49896,49898,49899,52576,52577,52578,58200,58201,58202,72836,72837,72839,112144,112146,112147,117980,117981,117983,132616,132618,132619,161580,161581,161582,162016,162017,162019,163036,163037,163039,192496,192498,192499],\"8\":[68444,68445,68446,142785,142786,142787,162372,162373,162375,168436,168437,168439,199589,199590,199591,210316,210317,210319,232812,232813,232814,291352,291353,291355,448580,448582,448583,471928,471929,471931,530469,530470,530471,646332,646333,646334,648073,648074,648075,652153,652154,652155,769989,769990,769991]}",
+  )
+}
+
+///|
+test "moc oracle set-13-union" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 13/80762683 122520645 184870205 211664419 227640520 231049671 268621670 338490928 384222658 573667457 618748613 651407334 651438426 699897026 707054966",
+    limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 3/86 136 153 163 202 216 369 437 478 564 567 607 707 714 723 732", limits,
+  )
+  let actual = a.union(b, limits)
+  moc_oracle_assert(
+    "set-13-union",
+    actual,
+    13,
+    [
+      (0, 67108864),
+      (80762683, 80762684),
+      (90177536, 91226112),
+      (122520645, 122520646),
+      (142606336, 143654912),
+      (160432128, 161480704),
+      (170917888, 171966464),
+      (184870205, 184870206),
+      (211664419, 211664420),
+      (211812352, 212860928),
+      (226492416, 227540992),
+      (227640520, 227640521),
+      (231049671, 231049672),
+      (268621670, 268621671),
+      (338490928, 338490929),
+      (384222658, 384222659),
+      (386924544, 387973120),
+      (458227712, 459276288),
+      (501219328, 502267904),
+      (573667457, 573667458),
+      (591396864, 592445440),
+      (594542592, 595591168),
+      (618748613, 618748614),
+      (636485632, 637534208),
+      (651407334, 651407335),
+      (651438426, 651438427),
+      (699897026, 699897027),
+      (707054966, 707054967),
+      (741343232, 742391808),
+      (748683264, 749731840),
+      (758120448, 759169024),
+      (767557632, 768606208),
+    ],
+    [
+      4, 342, 392, 409, 419, 458, 472, 625, 693, 734, 820, 823, 863, 963, 970, 979,
+      988, 349198139, 390956101, 453305661, 480099875, 496075976, 499485127, 537057126,
+      606926384, 652658114, 842102913, 887184069, 919842790, 919873882, 968332482,
+      975490422,
+    ],
+    "0/0 3/86 136 153 163 202 216 369 437 478 564 567 607 707 714 723 732 13/80762683 122520645 184870205 211664419 227640520 231049671 268621670 338490928 384222658 573667457 618748613 651407334 651438426 699897026 707054966",
+    "{\"0\":[0],\"3\":[86,136,153,163,202,216,369,437,478,564,567,607,707,714,723,732],\"13\":[80762683,122520645,184870205,211664419,227640520,231049671,268621670,338490928,384222658,573667457,618748613,651407334,651438426,699897026,707054966]}",
+  )
+}
+
+///|
+test "moc oracle set-13-intersection" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 13/80762683 122520645 184870205 211664419 227640520 231049671 268621670 338490928 384222658 573667457 618748613 651407334 651438426 699897026 707054966",
+    limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 3/86 136 153 163 202 216 369 437 478 564 567 607 707 714 723 732", limits,
+  )
+  let actual = a.intersection(b, limits)
+  moc_oracle_assert(
+    "set-13-intersection",
+    actual,
+    13,
+    [(0, 33554432)],
+    [16, 17],
+    "1/0-1 13/",
+    "{\"1\":[0,1],\"13\":[]}",
+  )
+}
+
+///|
+test "moc oracle set-13-difference" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 13/80762683 122520645 184870205 211664419 227640520 231049671 268621670 338490928 384222658 573667457 618748613 651407334 651438426 699897026 707054966",
+    limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 3/86 136 153 163 202 216 369 437 478 564 567 607 707 714 723 732", limits,
+  )
+  let actual = a.difference(b, limits)
+  moc_oracle_assert(
+    "set-13-difference",
+    actual,
+    13,
+    [
+      (33554432, 67108864),
+      (80762683, 80762684),
+      (122520645, 122520646),
+      (184870205, 184870206),
+      (211664419, 211664420),
+      (227640520, 227640521),
+      (231049671, 231049672),
+      (268621670, 268621671),
+      (338490928, 338490929),
+      (384222658, 384222659),
+      (573667457, 573667458),
+      (618748613, 618748614),
+      (651407334, 651407335),
+      (651438426, 651438427),
+      (699897026, 699897027),
+      (707054966, 707054967),
+    ],
+    [
+      18, 19, 349198139, 390956101, 453305661, 480099875, 496075976, 499485127, 537057126,
+      606926384, 652658114, 842102913, 887184069, 919842790, 919873882, 968332482,
+      975490422,
+    ],
+    "1/2-3 13/80762683 122520645 184870205 211664419 227640520 231049671 268621670 338490928 384222658 573667457 618748613 651407334 651438426 699897026 707054966",
+    "{\"1\":[2,3],\"13\":[80762683,122520645,184870205,211664419,227640520,231049671,268621670,338490928,384222658,573667457,618748613,651407334,651438426,699897026,707054966]}",
+  )
+}
+
+///|
+test "moc oracle set-13-complement" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 13/80762683 122520645 184870205 211664419 227640520 231049671 268621670 338490928 384222658 573667457 618748613 651407334 651438426 699897026 707054966",
+    limits,
+  )
+  let actual = a.complement(limits)
+  moc_oracle_assert(
+    "set-13-complement",
+    actual,
+    13,
+    [
+      (67108864, 80762683),
+      (80762684, 122520645),
+      (122520646, 184870205),
+      (184870206, 211664419),
+      (211664420, 227640520),
+      (227640521, 231049671),
+      (231049672, 268621670),
+      (268621671, 338490928),
+      (338490929, 384222658),
+      (384222659, 573667457),
+      (573667458, 618748613),
+      (618748614, 651407334),
+      (651407335, 651438426),
+      (651438427, 699897026),
+      (699897027, 707054966),
+      (707054967, 805306368),
+    ],
+    [
+      10, 11, 15, 21, 22, 24, 25, 26, 30, 31, 33, 34, 35, 37, 39, 48, 49, 51, 53,
+      55, 56, 59, 80, 81, 82, 92, 94, 95, 109, 110, 111, 112, 113, 115, 116, 117,
+      129, 130, 131, 145, 146, 147, 152, 153, 154, 201, 202, 203, 208, 209, 210,
+      216, 217, 218, 228, 229, 231, 233, 234, 235, 332, 334, 335, 373, 374, 375,
+      433, 434, 435, 456, 458, 459, 472, 474, 475, 477, 478, 479, 513, 514, 515,
+      576, 577, 579, 620, 621, 623, 800, 801, 802, 844, 845, 847, 876, 878, 879,
+      920, 921, 922, 928, 929, 931, 1333, 1334, 1335, 1488, 1489, 1490, 1728, 1730,
+      1731, 1828, 1829, 1830, 1893, 1894, 1895, 1904, 1906, 1907, 2049, 2050, 2051,
+      2312, 2313, 2314, 2488, 2490, 2491, 3213, 3214, 3215, 3385, 3386, 3387, 3510,
+      3511, 3692, 3694, 3695, 3720, 3722, 3723, 5329, 5330, 5331, 5964, 5966, 5967,
+      6917, 6918, 6919, 7324, 7326, 7327, 7568, 7570, 7571, 7620, 7622, 7623, 8192,
+      8193, 8195, 9261, 9262, 9263, 9956, 9957, 9959, 12848, 12850, 12851, 13536,
+      13538, 13539, 14032, 14033, 14034, 14037, 14038, 14039, 14772, 14773, 14774,
+      14885, 14886, 14887, 21312, 21314, 21315, 23860, 23861, 23863, 27664, 27665,
+      27666, 29300, 29301, 29303, 30276, 30277, 30279, 30484, 30485, 30487, 32776,
+      32777, 32778, 37040, 37041, 37042, 39832, 39833, 39834, 51396, 51398, 51399,
+      54148, 54150, 54151, 56140, 56141, 56143, 56145, 56146, 56147, 59100, 59101,
+      59103, 59536, 59537, 59538, 85252, 85254, 85255, 95449, 95450, 95451, 110668,
+      110669, 110671, 117208, 117209, 117210, 121113, 121114, 121115, 121945, 121946,
+      121947, 131116, 131118, 131119, 148172, 148173, 148174, 159341, 159342, 159343,
+      205588, 205589, 205590, 216596, 216598, 216599, 224568, 224569, 224571, 224576,
+      224577, 224579, 236408, 236410, 236411, 238157, 238158, 238159, 341012, 341014,
+      341015, 381792, 381794, 381795, 442680, 442682, 442683, 468844, 468845, 468846,
+      484448, 484450, 484451, 487776, 487777, 487779, 524468, 524470, 524471, 592700,
+      592702, 592703, 637360, 637362, 637363, 822364, 822365, 822367, 866388, 866389,
+      866391, 898280, 898281, 898282, 898312, 898313, 898315, 945636, 945638, 945639,
+      952624, 952625, 952626, 1364052, 1364053, 1364054, 1527173, 1527174, 1527175,
+      1770724, 1770726, 1770727, 1875388, 1875389, 1875391, 1937797, 1937798, 1937799,
+      1951112, 1951114, 1951115, 2097876, 2097877, 2097878, 2370804, 2370805, 2370807,
+      2549444, 2549446, 2549447, 3289465, 3289466, 3289467, 3465560, 3465561, 3465563,
+      3593132, 3593133, 3593134, 3593256, 3593258, 3593259, 3782549, 3782550, 3782551,
+      3810508, 3810510, 3810511, 5456221, 5456222, 5456223, 6108688, 6108690, 6108691,
+      7082901, 7082902, 7082903, 7501561, 7501562, 7501563, 7751184, 7751185, 7751186,
+      7804452, 7804453, 7804454, 8391516, 8391518, 8391519, 9483225, 9483226, 9483227,
+      10197780, 10197781, 10197782, 13157856, 13157857, 13157859, 13862248, 13862249,
+      13862250, 14372540, 14372541, 14372542, 14373028, 14373030, 14373031, 15130192,
+      15130193, 15130194, 15242036, 15242038, 15242039, 21824880, 21824881, 21824882,
+      24434757, 24434758, 24434759, 28331600, 28331601, 28331602, 30006240, 30006241,
+      30006243, 31004749, 31004750, 31004751, 31217821, 31217822, 31217823, 33566068,
+      33566069, 33566071, 37932896, 37932897, 37932898, 40791133, 40791134, 40791135,
+      52631433, 52631434, 52631435, 55449005, 55449006, 55449007, 57490172, 57490173,
+      57490175, 57492116, 57492118, 57492119, 60520781, 60520782, 60520783, 60968148,
+      60968149, 60968150, 87299532, 87299533, 87299535, 97739024, 97739026, 97739027,
+      113326412, 113326413, 113326414, 120024969, 120024970, 120024971, 124018992,
+      124018993, 124018995, 124871280, 124871282, 124871283, 134264280, 134264282,
+      134264283, 151731597, 151731598, 151731599, 163164529, 163164530, 163164531,
+      210525729, 210525730, 210525731, 221796016, 221796018, 221796019, 229960696,
+      229960698, 229960699, 229968468, 229968469, 229968471, 242083121, 242083122,
+      242083123, 243872604, 243872606, 243872607, 349198136, 349198137, 349198138,
+      390956100, 390956102, 390956103, 453305660, 453305662, 453305663, 480099872,
+      480099873, 480099874, 496075977, 496075978, 496075979, 499485124, 499485125,
+      499485126, 537057124, 537057125, 537057127, 606926385, 606926386, 606926387,
+      652658112, 652658113, 652658115, 842102912, 842102914, 842102915, 887184068,
+      887184070, 887184071, 919842788, 919842789, 919842791, 919873880, 919873881,
+      919873883, 968332480, 968332481, 968332483, 975490420, 975490421, 975490423,
+    ],
+    "0/6-7 11 1/5-6 8-10 14-15 17-19 21 23 32-33 35 37 39-40 43 2/16-18 28 30-31 45-49 51-53 65-67 81-83 88-90 137-139 144-146 152-154 164-165 167 169-171 3/76 78-79 117-119 177-179 200 202-203 216 218-219 221-223 257-259 320-321 323 364-365 367 544-546 588-589 591 620 622-623 664-666 672-673 675 4/309-311 464-466 704 706-707 804-806 869-871 880 882-883 1025-1027 1288-1290 1464 1466-1467 2189-2191 2361-2363 2486-2487 2668 2670-2671 2696 2698-2699 5/1233-1235 1868 1870-1871 2821-2823 3228 3230-3231 3472 3474-3475 3524 3526-3527 4096-4097 4099 5165-5167 5860-5861 5863 8752 8754-8755 9440 9442-9443 9936-9938 9941-9943 10676-10678 10789-10791 6/4928 4930-4931 7476-7477 7479 11280-11282 12916-12917 12919 13892-13893 13895 14100-14101 14103 16392-16394 20656-20658 23448-23450 35012 35014-35015 37764 37766-37767 39756-39757 39759 39761-39763 42716-42717 42719 43152-43154 7/19716 19718-19719 29913-29915 45132-45133 45135 51672-51674 55577-55579 56409-56411 65580 65582-65583 82636-82638 93805-93807 140052-140054 151060 151062-151063 159032-159033 159035 159040-159041 159043 170872 170874-170875 172621-172623 8/78868 78870-78871 119648 119650-119651 180536 180538-180539 206700-206702 222304 222306-222307 225632-225633 225635 262324 262326-262327 330556 330558-330559 375216 375218-375219 560220-560221 560223 604244-604245 604247 636136-636138 636168-636169 636171 683492 683494-683495 690480-690482 9/315476-315478 478597-478599 722148 722150-722151 826812-826813 826815 889221-889223 902536 902538-902539 1049300-1049302 1322228-1322229 1322231 1500868 1500870-1500871 2240889-2240891 2416984-2416985 2416987 2544556-2544558 2544680 2544682-2544683 2733973-2733975 2761932 2761934-2761935 10/1261917-1261919 1914384 1914386-1914387 2888597-2888599 3307257-3307259 3556880-3556882 3610148-3610150 4197212 4197214-4197215 5288921-5288923 6003476-6003478 8963552-8963553 8963555 9667944-9667946 10178236-10178238 10178724 10178726-10178727 10935888-10935890 11047732 11047734-11047735 11/5047664-5047666 7657541-7657543 11554384-11554386 13229024-13229025 13229027 14227533-14227535 14440605-14440607 16788852-16788853 16788855 21155680-21155682 24013917-24013919 35854217-35854219 38671789-38671791 40712956-40712957 40712959 40714900 40714902-40714903 43743565-43743567 44190932-44190934 12/20190668-20190669 20190671 30630160 30630162-30630163 46217548-46217550 52916105-52916107 56910128-56910129 56910131 57762416 57762418-57762419 67155416 67155418-67155419 84622733-84622735 96055665-96055667 143416865-143416867 154687152 154687154-154687155 162851832 162851834-162851835 162859604-162859605 162859607 174974257-174974259 176763740 176763742-176763743 13/80762680-80762682 122520644 122520646-122520647 184870204 184870206-184870207 211664416-211664418 227640521-227640523 231049668-231049670 268621668-268621669 268621671 338490929-338490931 384222656-384222657 384222659 573667456 573667458-573667459 618748612 618748614-618748615 651407332-651407333 651407335 651438424-651438425 651438427 699897024-699897025 699897027 707054964-707054965 707054967",
+    "{\"0\":[6,7,11],\"1\":[5,6,8,9,10,14,15,17,18,19,21,23,32,33,35,37,39,40,43],\"2\":[16,17,18,28,30,31,45,46,47,48,49,51,52,53,65,66,67,81,82,83,88,89,90,137,138,139,144,145,146,152,153,154,164,165,167,169,170,171],\"3\":[76,78,79,117,118,119,177,178,179,200,202,203,216,218,219,221,222,223,257,258,259,320,321,323,364,365,367,544,545,546,588,589,591,620,622,623,664,665,666,672,673,675],\"4\":[309,310,311,464,465,466,704,706,707,804,805,806,869,870,871,880,882,883,1025,1026,1027,1288,1289,1290,1464,1466,1467,2189,2190,2191,2361,2362,2363,2486,2487,2668,2670,2671,2696,2698,2699],\"5\":[1233,1234,1235,1868,1870,1871,2821,2822,2823,3228,3230,3231,3472,3474,3475,3524,3526,3527,4096,4097,4099,5165,5166,5167,5860,5861,5863,8752,8754,8755,9440,9442,9443,9936,9937,9938,9941,9942,9943,10676,10677,10678,10789,10790,10791],\"6\":[4928,4930,4931,7476,7477,7479,11280,11281,11282,12916,12917,12919,13892,13893,13895,14100,14101,14103,16392,16393,16394,20656,20657,20658,23448,23449,23450,35012,35014,35015,37764,37766,37767,39756,39757,39759,39761,39762,39763,42716,42717,42719,43152,43153,43154],\"7\":[19716,19718,19719,29913,29914,29915,45132,45133,45135,51672,51673,51674,55577,55578,55579,56409,56410,56411,65580,65582,65583,82636,82637,82638,93805,93806,93807,140052,140053,140054,151060,151062,151063,159032,159033,159035,159040,159041,159043,170872,170874,170875,172621,172622,172623],\"8\":[78868,78870,78871,119648,119650,119651,180536,180538,180539,206700,206701,206702,222304,222306,222307,225632,225633,225635,262324,262326,262327,330556,330558,330559,375216,375218,375219,560220,560221,560223,604244,604245,604247,636136,636137,636138,636168,636169,636171,683492,683494,683495,690480,690481,690482],\"9\":[315476,315477,315478,478597,478598,478599,722148,722150,722151,826812,826813,826815,889221,889222,889223,902536,902538,902539,1049300,1049301,1049302,1322228,1322229,1322231,1500868,1500870,1500871,2240889,2240890,2240891,2416984,2416985,2416987,2544556,2544557,2544558,2544680,2544682,2544683,2733973,2733974,2733975,2761932,2761934,2761935],\"10\":[1261917,1261918,1261919,1914384,1914386,1914387,2888597,2888598,2888599,3307257,3307258,3307259,3556880,3556881,3556882,3610148,3610149,3610150,4197212,4197214,4197215,5288921,5288922,5288923,6003476,6003477,6003478,8963552,8963553,8963555,9667944,9667945,9667946,10178236,10178237,10178238,10178724,10178726,10178727,10935888,10935889,10935890,11047732,11047734,11047735],\"11\":[5047664,5047665,5047666,7657541,7657542,7657543,11554384,11554385,11554386,13229024,13229025,13229027,14227533,14227534,14227535,14440605,14440606,14440607,16788852,16788853,16788855,21155680,21155681,21155682,24013917,24013918,24013919,35854217,35854218,35854219,38671789,38671790,38671791,40712956,40712957,40712959,40714900,40714902,40714903,43743565,43743566,43743567,44190932,44190933,44190934],\"12\":[20190668,20190669,20190671,30630160,30630162,30630163,46217548,46217549,46217550,52916105,52916106,52916107,56910128,56910129,56910131,57762416,57762418,57762419,67155416,67155418,67155419,84622733,84622734,84622735,96055665,96055666,96055667,143416865,143416866,143416867,154687152,154687154,154687155,162851832,162851834,162851835,162859604,162859605,162859607,174974257,174974258,174974259,176763740,176763742,176763743],\"13\":[80762680,80762681,80762682,122520644,122520646,122520647,184870204,184870206,184870207,211664416,211664417,211664418,227640521,227640522,227640523,231049668,231049669,231049670,268621668,268621669,268621671,338490929,338490930,338490931,384222656,384222657,384222659,573667456,573667458,573667459,618748612,618748614,618748615,651407332,651407333,651407335,651438424,651438425,651438427,699897024,699897025,699897027,707054964,707054965,707054967]}",
+  )
+}
+
+///|
+test "moc oracle set-14-union" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 2/30 34 52 71 83 89 108 142 167 174 185 191", limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 9/559618 726743 922479 1005162 1168036 1296610 2170168 2621599 2643853 2807258 2871768 2955428 2964358 3031562",
+    limits,
+  )
+  let actual = a.union(b, limits)
+  moc_oracle_assert(
+    "set-14-union",
+    actual,
+    9,
+    [
+      (0, 67108864),
+      (125829120, 130023424),
+      (142606336, 146800640),
+      (186046208, 186046464),
+      (218103808, 222298112),
+      (236154624, 236154880),
+      (257321472, 257321728),
+      (297795584, 301989888),
+      (331932160, 331932416),
+      (348127232, 352321536),
+      (373293056, 377487360),
+      (452984832, 457179136),
+      (555563008, 555563264),
+      (595591168, 599785472),
+      (671129344, 671129600),
+      (676826368, 676826624),
+      (700448768, 704643072),
+      (718658048, 718658304),
+      (729808896, 734003200),
+      (735172608, 735172864),
+      (756589568, 756589824),
+      (758875648, 758875904),
+      (775946240, 780140544),
+      (801112064, 805306368),
+    ],
+    [
+      4, 94, 98, 116, 135, 147, 153, 172, 206, 231, 238, 249, 255, 1775319, 1971055,
+      2053738, 2345186, 3218744, 3670175, 3692429, 3855834, 3920344, 4004004, 4012934,
+    ],
+    "0/0 2/30 34 52 71 83 89 108 142 167 174 185 191 9/726743 922479 1005162 1296610 2170168 2621599 2643853 2807258 2871768 2955428 2964358",
+    "{\"0\":[0],\"2\":[30,34,52,71,83,89,108,142,167,174,185,191],\"9\":[726743,922479,1005162,1296610,2170168,2621599,2643853,2807258,2871768,2955428,2964358]}",
+  )
+}
+
+///|
+test "moc oracle set-14-intersection" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 2/30 34 52 71 83 89 108 142 167 174 185 191", limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 9/559618 726743 922479 1005162 1168036 1296610 2170168 2621599 2643853 2807258 2871768 2955428 2964358 3031562",
+    limits,
+  )
+  let actual = a.intersection(b, limits)
+  moc_oracle_assert(
+    "set-14-intersection",
+    actual,
+    9,
+    [
+      (0, 33554432),
+      (143262208, 143262464),
+      (299017216, 299017472),
+      (776079872, 776080128),
+    ],
+    [16, 17, 1608194, 2216612, 4080138],
+    "1/0-1 9/559618 1168036 3031562",
+    "{\"1\":[0,1],\"9\":[559618,1168036,3031562]}",
+  )
+}
+
+///|
+test "moc oracle set-14-difference" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 2/30 34 52 71 83 89 108 142 167 174 185 191", limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 9/559618 726743 922479 1005162 1168036 1296610 2170168 2621599 2643853 2807258 2871768 2955428 2964358 3031562",
+    limits,
+  )
+  let actual = a.difference(b, limits)
+  moc_oracle_assert(
+    "set-14-difference",
+    actual,
+    9,
+    [
+      (33554432, 67108864),
+      (125829120, 130023424),
+      (142606336, 143262208),
+      (143262464, 146800640),
+      (218103808, 222298112),
+      (297795584, 299017216),
+      (299017472, 301989888),
+      (348127232, 352321536),
+      (373293056, 377487360),
+      (452984832, 457179136),
+      (595591168, 599785472),
+      (700448768, 704643072),
+      (729808896, 734003200),
+      (775946240, 776079872),
+      (776080128, 780140544),
+      (801112064, 805306368),
+    ],
+    [
+      18, 19, 94, 116, 147, 153, 172, 206, 231, 238, 255, 393, 394, 395, 540, 542,
+      543, 997, 998, 999, 1568, 1569, 1571, 2165, 2166, 2167, 3985, 3986, 3987, 6280,
+      6281, 6283, 8656, 8657, 8659, 15936, 15937, 15939, 25129, 25130, 25131, 34632,
+      34633, 34635, 63753, 63754, 63755, 100513, 100514, 100515, 138536, 138537,
+      138539, 255009, 255010, 255011, 402049, 402050, 402051, 554152, 554154, 554155,
+      1020032, 1020033, 1020035, 1608192, 1608193, 1608195, 2216613, 2216614, 2216615,
+      4080136, 4080137, 4080139,
+    ],
+    "1/2-3 2/30 52 83 89 108 142 167 174 191 3/137-139 284 286-287 741-743 4/544-545 547 1141-1143 2961-2963 5/2184-2185 2187 4560-4561 4563 11840-11841 11843 6/8745-8747 18248-18249 18251 47369-47371 7/34977-34979 73000-73001 73003 189473-189475 8/139905-139907 292008 292010-292011 757888-757889 757891 9/559616-559617 559619 1168037-1168039 3031560-3031561 3031563",
+    "{\"1\":[2,3],\"2\":[30,52,83,89,108,142,167,174,191],\"3\":[137,138,139,284,286,287,741,742,743],\"4\":[544,545,547,1141,1142,1143,2961,2962,2963],\"5\":[2184,2185,2187,4560,4561,4563,11840,11841,11843],\"6\":[8745,8746,8747,18248,18249,18251,47369,47370,47371],\"7\":[34977,34978,34979,73000,73001,73003,189473,189474,189475],\"8\":[139905,139906,139907,292008,292010,292011,757888,757889,757891],\"9\":[559616,559617,559619,1168037,1168038,1168039,3031560,3031561,3031563]}",
+  )
+}
+
+///|
+test "moc oracle set-14-complement" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 2/30 34 52 71 83 89 108 142 167 174 185 191", limits,
+  )
+  let actual = a.complement(limits)
+  moc_oracle_assert(
+    "set-14-complement",
+    actual,
+    2,
+    [
+      (67108864, 125829120),
+      (130023424, 142606336),
+      (146800640, 218103808),
+      (222298112, 297795584),
+      (301989888, 348127232),
+      (352321536, 373293056),
+      (377487360, 452984832),
+      (457179136, 595591168),
+      (599785472, 700448768),
+      (704643072, 729808896),
+      (734003200, 775946240),
+      (780140544, 801112064),
+    ],
+    [
+      11, 13, 20, 21, 22, 25, 26, 27, 28, 30, 31, 32, 34, 35, 37, 39, 40, 41, 42,
+      48, 49, 50, 56, 58, 60, 61, 92, 93, 95, 96, 97, 99, 117, 118, 119, 132, 133,
+      134, 144, 145, 146, 152, 154, 155, 173, 174, 175, 204, 205, 207, 228, 229,
+      230, 236, 237, 239, 248, 250, 251, 252, 253, 254,
+    ],
+    "0/7 9 1/4-6 9-12 14-16 18-19 21 23-26 32-34 40 42 44-45 2/28-29 31-33 35 53-55 68-70 80-82 88 90-91 109-111 140-141 143 164-166 172-173 175 184 186-190",
+    "{\"0\":[7,9],\"1\":[4,5,6,9,10,11,12,14,15,16,18,19,21,23,24,25,26,32,33,34,40,42,44,45],\"2\":[28,29,31,32,33,35,53,54,55,68,69,70,80,81,82,88,90,91,109,110,111,140,141,143,164,165,166,172,173,175,184,186,187,188,189,190]}",
+  )
+}
+
+///|
+test "moc oracle set-15-union" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 3/68 105 165 180 229 304-305 393-394 400 500 518 610 614 619 736", limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 2/21 31 34 41 48 52 54 71 99 106-107 125 154 178 189", limits,
+  )
+  let actual = a.union(b, limits)
+  moc_oracle_assert(
+    "set-15-union",
+    actual,
+    3,
+    [
+      (0, 67108864),
+      (71303168, 72351744),
+      (88080384, 92274688),
+      (110100480, 111149056),
+      (130023424, 134217728),
+      (142606336, 146800640),
+      (171966464, 176160768),
+      (188743680, 189792256),
+      (201326592, 205520896),
+      (218103808, 222298112),
+      (226492416, 230686720),
+      (240123904, 241172480),
+      (297795584, 301989888),
+      (318767104, 320864256),
+      (412090368, 414187520),
+      (415236096, 420478976),
+      (444596224, 452984832),
+      (524288000, 528482304),
+      (543162368, 544210944),
+      (639631360, 640679936),
+      (643825664, 644874240),
+      (645922816, 650117120),
+      (746586112, 750780416),
+      (771751936, 772800512),
+      (792723456, 796917760),
+    ],
+    [
+      4, 85, 95, 98, 105, 112, 116, 118, 135, 163, 170, 171, 189, 218, 242, 253,
+      324, 361, 436, 485, 560, 561, 649, 650, 656, 774, 866, 870, 992,
+    ],
+    "0/0 2/21 31 34 41 48 52 54 71 99 106-107 125 154 178 189 3/68 105 180 229 304-305 393-394 400 518 610 614 736",
+    "{\"0\":[0],\"2\":[21,31,34,41,48,52,54,71,99,106,107,125,154,178,189],\"3\":[68,105,180,229,304,305,393,394,400,518,610,614,736]}",
+  )
+}
+
+///|
+test "moc oracle set-15-intersection" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 3/68 105 165 180 229 304-305 393-394 400 500 518 610 614 619 736", limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 2/21 31 34 41 48 52 54 71 99 106-107 125 154 178 189", limits,
+  )
+  let actual = a.intersection(b, limits)
+  moc_oracle_assert(
+    "set-15-intersection",
+    actual,
+    3,
+    [
+      (0, 33554432),
+      (173015040, 174063616),
+      (524288000, 525336576),
+      (649068544, 650117120),
+    ],
+    [16, 17, 421, 756, 875],
+    "1/0-1 3/165 500 619",
+    "{\"1\":[0,1],\"3\":[165,500,619]}",
+  )
+}
+
+///|
+test "moc oracle set-15-difference" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 3/68 105 165 180 229 304-305 393-394 400 500 518 610 614 619 736", limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 2/21 31 34 41 48 52 54 71 99 106-107 125 154 178 189", limits,
+  )
+  let actual = a.difference(b, limits)
+  moc_oracle_assert(
+    "set-15-difference",
+    actual,
+    3,
+    [
+      (33554432, 67108864),
+      (71303168, 72351744),
+      (110100480, 111149056),
+      (188743680, 189792256),
+      (240123904, 241172480),
+      (318767104, 320864256),
+      (412090368, 414187520),
+      (419430400, 420478976),
+      (543162368, 544210944),
+      (639631360, 640679936),
+      (643825664, 644874240),
+      (771751936, 772800512),
+    ],
+    [18, 19, 324, 361, 436, 485, 560, 561, 649, 650, 656, 774, 866, 870, 992],
+    "1/2-3 3/68 105 180 229 304-305 393-394 400 518 610 614 736",
+    "{\"1\":[2,3],\"3\":[68,105,180,229,304,305,393,394,400,518,610,614,736]}",
+  )
+}
+
+///|
+test "moc oracle set-15-complement" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 3/68 105 165 180 229 304-305 393-394 400 500 518 610 614 619 736", limits,
+  )
+  let actual = a.complement(limits)
+  moc_oracle_assert(
+    "set-15-complement",
+    actual,
+    3,
+    [
+      (67108864, 71303168),
+      (72351744, 110100480),
+      (111149056, 173015040),
+      (174063616, 188743680),
+      (189792256, 240123904),
+      (241172480, 318767104),
+      (320864256, 412090368),
+      (414187520, 419430400),
+      (420478976, 524288000),
+      (525336576, 543162368),
+      (544210944, 639631360),
+      (640679936, 643825664),
+      (644874240, 649068544),
+      (650117120, 771751936),
+      (772800512, 805306368),
+    ],
+    [
+      9, 14, 21, 23, 24, 25, 28, 29, 31, 32, 33, 34, 42, 43, 44, 45, 46, 49, 50,
+      51, 52, 53, 55, 60, 61, 63, 80, 82, 83, 88, 89, 91, 104, 106, 107, 108, 110,
+      111, 120, 122, 123, 141, 142, 143, 160, 161, 163, 165, 166, 167, 188, 190,
+      191, 192, 194, 195, 219, 249, 250, 251, 325, 326, 327, 360, 362, 363, 420,
+      422, 423, 437, 438, 439, 484, 486, 487, 562, 563, 648, 651, 657, 658, 659,
+      757, 758, 759, 772, 773, 775, 864, 865, 867, 868, 869, 871, 872, 873, 874,
+      993, 994, 995,
+    ],
+    "0/5 10 1/5 7-9 12-13 15-18 26-30 33-37 39 44-45 47 2/16 18-19 24-25 27 40 42-44 46-47 56 58-59 77-79 96-97 99 101-103 124 126-128 130-131 155 185-187 3/69-71 104 106-107 164 166-167 181-183 228 230-231 306-307 392 395 401-403 501-503 516-517 519 608-609 611-613 615-618 737-739",
+    "{\"0\":[5,10],\"1\":[5,7,8,9,12,13,15,16,17,18,26,27,28,29,30,33,34,35,36,37,39,44,45,47],\"2\":[16,18,19,24,25,27,40,42,43,44,46,47,56,58,59,77,78,79,96,97,99,101,102,103,124,126,127,128,130,131,155,185,186,187],\"3\":[69,70,71,104,106,107,164,166,167,181,182,183,228,230,231,306,307,392,395,401,402,403,501,502,503,516,517,519,608,609,611,612,613,615,616,617,618,737,738,739]}",
+  )
+}
+
+///|
+test "moc oracle set-16-union" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 13/143110873 201443902 208756642 214302206 288616806 342863311 347277309 431073676 455108662 460821751 514981763 543267906 687502349 710831857",
+    limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 3/56 96 115 134 148 229 274 299 313 319-320 550 610 653 738", limits,
+  )
+  let actual = a.union(b, limits)
+  moc_oracle_assert(
+    "set-16-union",
+    actual,
+    13,
+    [
+      (0, 67108864),
+      (100663296, 101711872),
+      (120586240, 121634816),
+      (140509184, 141557760),
+      (143110873, 143110874),
+      (155189248, 156237824),
+      (201443902, 201443903),
+      (208756642, 208756643),
+      (214302206, 214302207),
+      (240123904, 241172480),
+      (287309824, 288358400),
+      (288616806, 288616807),
+      (313524224, 314572800),
+      (328204288, 329252864),
+      (334495744, 336592896),
+      (342863311, 342863312),
+      (347277309, 347277310),
+      (431073676, 431073677),
+      (455108662, 455108663),
+      (460821751, 460821752),
+      (514981763, 514981764),
+      (543267906, 543267907),
+      (576716800, 577765376),
+      (639631360, 640679936),
+      (684720128, 685768704),
+      (687502349, 687502350),
+      (710831857, 710831858),
+      (773849088, 774897664),
+    ],
+    [
+      4, 352, 371, 390, 404, 485, 530, 555, 569, 575, 576, 806, 866, 909, 994, 411546329,
+      469879358, 477192098, 482737662, 557052262, 611298767, 615712765, 699509132,
+      723544118, 729257207, 783417219, 811703362, 955937805, 979267313,
+    ],
+    "0/0 3/96 115 134 148 229 274 299 313 319-320 550 610 653 738 13/143110873 201443902 208756642 214302206 288616806 342863311 347277309 431073676 455108662 460821751 514981763 543267906 687502349 710831857",
+    "{\"0\":[0],\"3\":[96,115,134,148,229,274,299,313,319,320,550,610,653,738],\"13\":[143110873,201443902,208756642,214302206,288616806,342863311,347277309,431073676,455108662,460821751,514981763,543267906,687502349,710831857]}",
+  )
+}
+
+///|
+test "moc oracle set-16-intersection" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 13/143110873 201443902 208756642 214302206 288616806 342863311 347277309 431073676 455108662 460821751 514981763 543267906 687502349 710831857",
+    limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 3/56 96 115 134 148 229 274 299 313 319-320 550 610 653 738", limits,
+  )
+  let actual = a.intersection(b, limits)
+  moc_oracle_assert(
+    "set-16-intersection",
+    actual,
+    13,
+    [(0, 33554432), (58720256, 59768832)],
+    [16, 17, 312],
+    "1/0-1 3/56 13/",
+    "{\"1\":[0,1],\"3\":[56],\"13\":[]}",
+  )
+}
+
+///|
+test "moc oracle set-16-difference" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 13/143110873 201443902 208756642 214302206 288616806 342863311 347277309 431073676 455108662 460821751 514981763 543267906 687502349 710831857",
+    limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 3/56 96 115 134 148 229 274 299 313 319-320 550 610 653 738", limits,
+  )
+  let actual = a.difference(b, limits)
+  moc_oracle_assert(
+    "set-16-difference",
+    actual,
+    13,
+    [
+      (33554432, 58720256),
+      (59768832, 67108864),
+      (143110873, 143110874),
+      (201443902, 201443903),
+      (208756642, 208756643),
+      (214302206, 214302207),
+      (288616806, 288616807),
+      (342863311, 342863312),
+      (347277309, 347277310),
+      (431073676, 431073677),
+      (455108662, 455108663),
+      (460821751, 460821752),
+      (514981763, 514981764),
+      (543267906, 543267907),
+      (687502349, 687502350),
+      (710831857, 710831858),
+    ],
+    [
+      18, 76, 77, 79, 313, 314, 315, 411546329, 469879358, 477192098, 482737662,
+      557052262, 611298767, 615712765, 699509132, 723544118, 729257207, 783417219,
+      811703362, 955937805, 979267313,
+    ],
+    "1/2 2/12-13 15 3/57-59 13/143110873 201443902 208756642 214302206 288616806 342863311 347277309 431073676 455108662 460821751 514981763 543267906 687502349 710831857",
+    "{\"1\":[2],\"2\":[12,13,15],\"3\":[57,58,59],\"13\":[143110873,201443902,208756642,214302206,288616806,342863311,347277309,431073676,455108662,460821751,514981763,543267906,687502349,710831857]}",
+  )
+}
+
+///|
+test "moc oracle set-16-complement" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 13/143110873 201443902 208756642 214302206 288616806 342863311 347277309 431073676 455108662 460821751 514981763 543267906 687502349 710831857",
+    limits,
+  )
+  let actual = a.complement(limits)
+  moc_oracle_assert(
+    "set-16-complement",
+    actual,
+    13,
+    [
+      (67108864, 143110873),
+      (143110874, 201443902),
+      (201443903, 208756642),
+      (208756643, 214302206),
+      (214302207, 288616806),
+      (288616807, 342863311),
+      (342863312, 347277309),
+      (347277310, 431073676),
+      (431073677, 455108662),
+      (455108663, 460821751),
+      (460821752, 514981763),
+      (514981764, 543267906),
+      (543267907, 687502349),
+      (687502350, 710831857),
+      (710831858, 805306368),
+    ],
+    [
+      5, 13, 15, 25, 26, 27, 29, 30, 31, 32, 34, 35, 37, 38, 39, 40, 42, 44, 45,
+      47, 49, 50, 51, 57, 59, 96, 97, 99, 114, 133, 134, 135, 144, 147, 164, 165,
+      167, 174, 175, 184, 185, 187, 192, 194, 195, 224, 225, 226, 232, 234, 235,
+      393, 394, 395, 449, 450, 451, 452, 453, 454, 461, 462, 463, 528, 529, 530,
+      580, 581, 583, 584, 585, 586, 664, 665, 666, 688, 689, 691, 692, 693, 694,
+      744, 745, 746, 772, 773, 775, 908, 909, 910, 932, 934, 935, 1568, 1570, 1571,
+      1793, 1794, 1795, 1821, 1822, 1823, 1840, 1842, 1843, 2125, 2126, 2127, 2328,
+      2329, 2330, 2349, 2350, 2351, 2669, 2670, 2671, 2761, 2762, 2763, 2780, 2782,
+      2783, 2989, 2990, 2991, 3097, 3098, 3099, 3644, 3645, 3647, 3732, 3733, 3734,
+      6276, 6277, 6278, 7168, 7170, 7171, 7280, 7282, 7283, 7364, 7366, 7367, 8496,
+      8497, 8498, 9324, 9325, 9326, 9392, 9393, 9394, 10672, 10674, 10675, 11041,
+      11042, 11043, 11124, 11125, 11126, 11952, 11954, 11955, 12384, 12386, 12387,
+      14584, 14585, 14587, 14940, 14941, 14943, 25116, 25117, 25119, 28676, 28677,
+      28678, 29124, 29126, 29127, 29460, 29461, 29462, 33996, 33997, 33998, 37308,
+      37309, 37311, 37581, 37582, 37583, 42692, 42693, 42695, 44160, 44162, 44163,
+      44508, 44509, 44511, 47812, 47813, 47814, 49540, 49541, 49543, 58344, 58346,
+      58347, 59768, 59770, 59771, 100472, 100473, 100474, 114717, 114718, 114719,
+      116500, 116502, 116503, 117852, 117853, 117854, 135996, 135997, 135998, 149240,
+      149241, 149243, 150321, 150322, 150323, 170776, 170777, 170779, 176644, 176645,
+      176647, 178040, 178042, 178043, 191260, 191261, 191262, 198168, 198170, 198171,
+      233380, 233381, 233382, 239076, 239077, 239079, 401901, 401902, 401903, 458864,
+      458865, 458867, 466004, 466005, 466006, 471420, 471421, 471422, 543997, 543998,
+      543999, 596968, 596969, 596970, 601280, 601282, 601283, 683112, 683113, 683115,
+      706584, 706585, 706587, 712164, 712166, 712167, 765052, 765053, 765054, 792676,
+      792677, 792678, 933532, 933534, 933535, 956312, 956313, 956314, 1607600, 1607601,
+      1607603, 1835464, 1835465, 1835467, 1864028, 1864029, 1864030, 1885692, 1885694,
+      1885695, 2175984, 2175986, 2175987, 2387884, 2387886, 2387887, 2405124, 2405125,
+      2405126, 2732456, 2732458, 2732459, 2826345, 2826346, 2826347, 2848661, 2848662,
+      2848663, 3060220, 3060221, 3060222, 3170717, 3170718, 3170719, 3734133, 3734134,
+      3734135, 3825260, 3825261, 3825263, 6430408, 6430409, 6430410, 7341865, 7341866,
+      7341867, 7456124, 7456125, 7456127, 7542772, 7542773, 7542774, 8703940, 8703942,
+      8703943, 9551540, 9551541, 9551542, 9620508, 9620509, 9620510, 10929828, 10929829,
+      10929831, 11305377, 11305378, 11305379, 11394640, 11394641, 11394642, 12240892,
+      12240893, 12240895, 12682864, 12682866, 12682867, 14936529, 14936530, 14936531,
+      15301048, 15301049, 15301050, 25721644, 25721646, 25721647, 29367456, 29367457,
+      29367458, 29824504, 29824505, 29824507, 30171100, 30171101, 30171102, 34815764,
+      34815765, 34815767, 38206173, 38206174, 38206175, 38482044, 38482045, 38482046,
+      43719321, 43719322, 43719323, 45221504, 45221505, 45221506, 45578572, 45578573,
+      45578574, 48963577, 48963578, 48963579, 50731461, 50731462, 50731463, 59746113,
+      59746114, 59746115, 61204204, 61204205, 61204206, 102886580, 102886581, 102886583,
+      117469836, 117469837, 117469838, 119298025, 119298026, 119298027, 120684412,
+      120684413, 120684414, 139263064, 139263066, 139263067, 152824688, 152824689,
+      152824690, 153928188, 153928189, 153928190, 174877280, 174877281, 174877282,
+      180886028, 180886030, 180886031, 182314300, 182314302, 182314303, 195854305,
+      195854306, 195854307, 202925841, 202925842, 202925843, 238984448, 238984449,
+      238984450, 244816829, 244816830, 244816831, 411546328, 411546330, 411546331,
+      469879356, 469879357, 469879359, 477192096, 477192097, 477192099, 482737660,
+      482737661, 482737663, 557052260, 557052261, 557052263, 611298764, 611298765,
+      611298766, 615712764, 615712766, 615712767, 699509133, 699509134, 699509135,
+      723544116, 723544117, 723544119, 729257204, 729257205, 729257206, 783417216,
+      783417217, 783417218, 811703360, 811703361, 811703363, 955937804, 955937806,
+      955937807, 979267312, 979267314, 979267315,
+    ],
+    "0/1 9 11 1/9-11 13-16 18-19 21-24 26 28-29 31 33-35 41 43 2/32-33 35 50 69-71 80 83 100-101 103 110-111 120-121 123 128 130-131 160-162 168 170-171 3/137-139 193-198 205-207 272-274 324-325 327-330 408-410 432-433 435-438 488-490 516-517 519 652-654 676 678-679 4/544 546-547 769-771 797-799 816 818-819 1101-1103 1304-1306 1325-1327 1645-1647 1737-1739 1756 1758-1759 1965-1967 2073-2075 2620-2621 2623 2708-2710 5/2180-2182 3072 3074-3075 3184 3186-3187 3268 3270-3271 4400-4402 5228-5230 5296-5298 6576 6578-6579 6945-6947 7028-7030 7856 7858-7859 8288 8290-8291 10488-10489 10491 10844-10845 10847 6/8732-8733 8735 12292-12294 12740 12742-12743 13076-13078 17612-17614 20924-20925 20927 21197-21199 26308-26309 26311 27776 27778-27779 28124-28125 28127 31428-31430 33156-33157 33159 41960 41962-41963 43384 43386-43387 7/34936-34938 49181-49183 50964 50966-50967 52316-52318 70460-70462 83704-83705 83707 84785-84787 105240-105241 105243 111108-111109 111111 112504 112506-112507 125724-125726 132632 132634-132635 167844-167846 173540-173541 173543 8/139757-139759 196720-196721 196723 203860-203862 209276-209278 281853-281855 334824-334826 339136 339138-339139 420968-420969 420971 444440-444441 444443 450020 450022-450023 502908-502910 530532-530534 671388 671390-671391 694168-694170 9/559024-559025 559027 786888-786889 786891 815452-815454 837116 837118-837119 1127408 1127410-1127411 1339308 1339310-1339311 1356548-1356550 1683880 1683882-1683883 1777769-1777771 1800085-1800087 2011644-2011646 2122141-2122143 2685557-2685559 2776684-2776685 2776687 10/2236104-2236106 3147561-3147563 3261820-3261821 3261823 3348468-3348470 4509636 4509638-4509639 5357236-5357238 5426204-5426206 6735524-6735525 6735527 7111073-7111075 7200336-7200338 8046588-8046589 8046591 8488560 8488562-8488563 10742225-10742227 11106744-11106746 11/8944428 8944430-8944431 12590240-12590242 13047288-13047289 13047291 13393884-13393886 18038548-18038549 18038551 21428957-21428959 21704828-21704830 26942105-26942107 28444288-28444290 28801356-28801358 32186361-32186363 33954245-33954247 42968897-42968899 44426988-44426990 12/35777716-35777717 35777719 50360972-50360974 52189161-52189163 53575548-53575550 72154200 72154202-72154203 85715824-85715826 86819324-86819326 107768416-107768418 113777164 113777166-113777167 115205436 115205438-115205439 128745441-128745443 135816977-135816979 171875584-171875586 177707965-177707967 13/143110872 143110874-143110875 201443900-201443901 201443903 208756640-208756641 208756643 214302204-214302205 214302207 288616804-288616805 288616807 342863308-342863310 347277308 347277310-347277311 431073677-431073679 455108660-455108661 455108663 460821748-460821750 514981760-514981762 543267904-543267905 543267907 687502348 687502350-687502351 710831856 710831858-710831859",
+    "{\"0\":[1,9,11],\"1\":[9,10,11,13,14,15,16,18,19,21,22,23,24,26,28,29,31,33,34,35,41,43],\"2\":[32,33,35,50,69,70,71,80,83,100,101,103,110,111,120,121,123,128,130,131,160,161,162,168,170,171],\"3\":[137,138,139,193,194,195,196,197,198,205,206,207,272,273,274,324,325,327,328,329,330,408,409,410,432,433,435,436,437,438,488,489,490,516,517,519,652,653,654,676,678,679],\"4\":[544,546,547,769,770,771,797,798,799,816,818,819,1101,1102,1103,1304,1305,1306,1325,1326,1327,1645,1646,1647,1737,1738,1739,1756,1758,1759,1965,1966,1967,2073,2074,2075,2620,2621,2623,2708,2709,2710],\"5\":[2180,2181,2182,3072,3074,3075,3184,3186,3187,3268,3270,3271,4400,4401,4402,5228,5229,5230,5296,5297,5298,6576,6578,6579,6945,6946,6947,7028,7029,7030,7856,7858,7859,8288,8290,8291,10488,10489,10491,10844,10845,10847],\"6\":[8732,8733,8735,12292,12293,12294,12740,12742,12743,13076,13077,13078,17612,17613,17614,20924,20925,20927,21197,21198,21199,26308,26309,26311,27776,27778,27779,28124,28125,28127,31428,31429,31430,33156,33157,33159,41960,41962,41963,43384,43386,43387],\"7\":[34936,34937,34938,49181,49182,49183,50964,50966,50967,52316,52317,52318,70460,70461,70462,83704,83705,83707,84785,84786,84787,105240,105241,105243,111108,111109,111111,112504,112506,112507,125724,125725,125726,132632,132634,132635,167844,167845,167846,173540,173541,173543],\"8\":[139757,139758,139759,196720,196721,196723,203860,203861,203862,209276,209277,209278,281853,281854,281855,334824,334825,334826,339136,339138,339139,420968,420969,420971,444440,444441,444443,450020,450022,450023,502908,502909,502910,530532,530533,530534,671388,671390,671391,694168,694169,694170],\"9\":[559024,559025,559027,786888,786889,786891,815452,815453,815454,837116,837118,837119,1127408,1127410,1127411,1339308,1339310,1339311,1356548,1356549,1356550,1683880,1683882,1683883,1777769,1777770,1777771,1800085,1800086,1800087,2011644,2011645,2011646,2122141,2122142,2122143,2685557,2685558,2685559,2776684,2776685,2776687],\"10\":[2236104,2236105,2236106,3147561,3147562,3147563,3261820,3261821,3261823,3348468,3348469,3348470,4509636,4509638,4509639,5357236,5357237,5357238,5426204,5426205,5426206,6735524,6735525,6735527,7111073,7111074,7111075,7200336,7200337,7200338,8046588,8046589,8046591,8488560,8488562,8488563,10742225,10742226,10742227,11106744,11106745,11106746],\"11\":[8944428,8944430,8944431,12590240,12590241,12590242,13047288,13047289,13047291,13393884,13393885,13393886,18038548,18038549,18038551,21428957,21428958,21428959,21704828,21704829,21704830,26942105,26942106,26942107,28444288,28444289,28444290,28801356,28801357,28801358,32186361,32186362,32186363,33954245,33954246,33954247,42968897,42968898,42968899,44426988,44426989,44426990],\"12\":[35777716,35777717,35777719,50360972,50360973,50360974,52189161,52189162,52189163,53575548,53575549,53575550,72154200,72154202,72154203,85715824,85715825,85715826,86819324,86819325,86819326,107768416,107768417,107768418,113777164,113777166,113777167,115205436,115205438,115205439,128745441,128745442,128745443,135816977,135816978,135816979,171875584,171875585,171875586,177707965,177707966,177707967],\"13\":[143110872,143110874,143110875,201443900,201443901,201443903,208756640,208756641,208756643,214302204,214302205,214302207,288616804,288616805,288616807,342863308,342863309,342863310,347277308,347277310,347277311,431073677,431073678,431073679,455108660,455108661,455108663,460821748,460821749,460821750,514981760,514981761,514981762,543267904,543267905,543267907,687502348,687502350,687502351,710831856,710831858,710831859]}",
+  )
+}
+
+///|
+test "moc oracle set-17-union" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 6/5385 7389 12784 13874 16398 19051 20382 20619 36697 39761 43421 43622",
+    limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 5/535 601 1614 2165 4066 4598 4677 6602 8111 8314 8767 8910 10748 11121 11164 12094",
+    limits,
+  )
+  let actual = a.union(b, limits)
+  moc_oracle_assert(
+    "set-17-union",
+    actual,
+    6,
+    [
+      (0, 67108864),
+      (88227840, 88244224),
+      (105775104, 105840640),
+      (121061376, 121077760),
+      (141885440, 141950976),
+      (209453056, 209469440),
+      (227311616, 227328000),
+      (266469376, 266534912),
+      (268664832, 268681216),
+      (301334528, 301400064),
+      (306511872, 306577408),
+      (312131584, 312147968),
+      (333938688, 333955072),
+      (337821696, 337838080),
+      (432668672, 432734208),
+      (531562496, 531628032),
+      (544866304, 544931840),
+      (574554112, 574619648),
+      (583925760, 583991296),
+      (601243648, 601260032),
+      (651444224, 651460608),
+      (704380928, 704446464),
+      (711409664, 711426048),
+      (714702848, 714719232),
+      (728825856, 728891392),
+      (731643904, 731709440),
+      (792592384, 792657920),
+    ],
+    [
+      4, 5710, 6261, 8162, 8694, 8773, 10698, 12207, 12410, 12863, 13006, 14844,
+      15217, 15260, 16190, 21769, 23773, 29168, 30258, 32782, 35435, 36766, 37003,
+      53081, 56145, 59805, 60006,
+    ],
+    "0/0 5/1614 2165 4066 4598 4677 6602 8111 8314 8767 8910 10748 11121 11164 12094 6/5385 7389 12784 13874 16398 19051 20382 20619 36697 39761 43421 43622",
+    "{\"0\":[0],\"5\":[1614,2165,4066,4598,4677,6602,8111,8314,8767,8910,10748,11121,11164,12094],\"6\":[5385,7389,12784,13874,16398,19051,20382,20619,36697,39761,43421,43622]}",
+  )
+}
+
+///|
+test "moc oracle set-17-intersection" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 6/5385 7389 12784 13874 16398 19051 20382 20619 36697 39761 43421 43622",
+    limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 5/535 601 1614 2165 4066 4598 4677 6602 8111 8314 8767 8910 10748 11121 11164 12094",
+    limits,
+  )
+  let actual = a.intersection(b, limits)
+  moc_oracle_assert(
+    "set-17-intersection",
+    actual,
+    6,
+    [(0, 33554432), (35061760, 35127296), (39387136, 39452672)],
+    [16, 17, 4631, 4697],
+    "1/0-1 5/535 601 6/",
+    "{\"1\":[0,1],\"5\":[535,601],\"6\":[]}",
+  )
+}
+
+///|
+test "moc oracle set-17-difference" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 6/5385 7389 12784 13874 16398 19051 20382 20619 36697 39761 43421 43622",
+    limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 5/535 601 1614 2165 4066 4598 4677 6602 8111 8314 8767 8910 10748 11121 11164 12094",
+    limits,
+  )
+  let actual = a.difference(b, limits)
+  moc_oracle_assert(
+    "set-17-difference",
+    actual,
+    6,
+    [
+      (33554432, 35061760),
+      (35127296, 39387136),
+      (39452672, 67108864),
+      (88227840, 88244224),
+      (121061376, 121077760),
+      (209453056, 209469440),
+      (227311616, 227328000),
+      (268664832, 268681216),
+      (312131584, 312147968),
+      (333938688, 333955072),
+      (337821696, 337838080),
+      (601243648, 601260032),
+      (651444224, 651460608),
+      (711409664, 711426048),
+      (714702848, 714719232),
+    ],
+    [
+      19, 74, 75, 288, 290, 291, 292, 294, 295, 1156, 1158, 1159, 1172, 1173, 1175,
+      4628, 4629, 4630, 4696, 4698, 4699, 21769, 23773, 29168, 30258, 32782, 35435,
+      36766, 37003, 53081, 56145, 59805, 60006,
+    ],
+    "1/3 2/10-11 3/32 34-36 38-39 4/132 134-135 148-149 151 5/532-534 600 602-603 6/5385 7389 12784 13874 16398 19051 20382 20619 36697 39761 43421 43622",
+    "{\"1\":[3],\"2\":[10,11],\"3\":[32,34,35,36,38,39],\"4\":[132,134,135,148,149,151],\"5\":[532,533,534,600,602,603],\"6\":[5385,7389,12784,13874,16398,19051,20382,20619,36697,39761,43421,43622]}",
+  )
+}
+
+///|
+test "moc oracle set-17-complement" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 6/5385 7389 12784 13874 16398 19051 20382 20619 36697 39761 43421 43622",
+    limits,
+  )
+  let actual = a.complement(limits)
+  moc_oracle_assert(
+    "set-17-complement",
+    actual,
+    6,
+    [
+      (67108864, 88227840),
+      (88244224, 121061376),
+      (121077760, 209453056),
+      (209469440, 227311616),
+      (227328000, 268664832),
+      (268681216, 312131584),
+      (312147968, 333938688),
+      (333955072, 337821696),
+      (337838080, 601243648),
+      (601260032, 651444224),
+      (651460608, 711409664),
+      (711426048, 714702848),
+      (714719232, 805306368),
+    ],
+    [
+      6, 10, 11, 15, 20, 22, 30, 31, 33, 37, 38, 39, 48, 49, 50, 52, 53, 55, 56,
+      57, 59, 84, 86, 87, 93, 94, 95, 112, 114, 115, 116, 117, 119, 129, 130, 131,
+      136, 137, 139, 140, 141, 142, 145, 146, 147, 204, 205, 206, 216, 217, 218,
+      232, 235, 341, 342, 343, 368, 369, 370, 452, 453, 454, 473, 474, 475, 513,
+      514, 515, 552, 554, 555, 572, 573, 575, 576, 577, 579, 828, 830, 831, 876,
+      878, 879, 932, 933, 935, 936, 938, 939, 1361, 1362, 1363, 1484, 1486, 1487,
+      1820, 1821, 1822, 1888, 1889, 1890, 2049, 2050, 2051, 2212, 2213, 2215, 2296,
+      2298, 2299, 2313, 2314, 2315, 3316, 3318, 3319, 3508, 3510, 3511, 3736, 3738,
+      3739, 3748, 3749, 3751, 5440, 5441, 5443, 5940, 5941, 5942, 7293, 7294, 7295,
+      7565, 7566, 7567, 8192, 8193, 8194, 8856, 8857, 8859, 9188, 9189, 9190, 9248,
+      9249, 9251, 13268, 13269, 13271, 14037, 14038, 14039, 14948, 14949, 14950,
+      15000, 15002, 15003, 21768, 21770, 21771, 23772, 23774, 23775, 29169, 29170,
+      29171, 30256, 30257, 30259, 32780, 32781, 32783, 35432, 35433, 35434, 36764,
+      36765, 36767, 37000, 37001, 37002, 53080, 53082, 53083, 56144, 56146, 56147,
+      59804, 59806, 59807, 60004, 60005, 60007,
+    ],
+    "0/2 6-7 11 1/4 6 14-15 17 21-23 32-34 36-37 39-41 43 2/20 22-23 29-31 48 50-53 55 65-67 72-73 75-78 81-83 140-142 152-154 168 171 3/85-87 112-114 196-198 217-219 257-259 296 298-299 316-317 319-321 323 572 574-575 620 622-623 676-677 679-680 682-683 4/337-339 460 462-463 796-798 864-866 1025-1027 1188-1189 1191 1272 1274-1275 1289-1291 2292 2294-2295 2484 2486-2487 2712 2714-2715 2724-2725 2727 5/1344-1345 1347 1844-1846 3197-3199 3469-3471 4096-4098 4760-4761 4763 5092-5094 5152-5153 5155 9172-9173 9175 9941-9943 10852-10854 10904 10906-10907 6/5384 5386-5387 7388 7390-7391 12785-12787 13872-13873 13875 16396-16397 16399 19048-19050 20380-20381 20383 20616-20618 36696 36698-36699 39760 39762-39763 43420 43422-43423 43620-43621 43623",
+    "{\"0\":[2,6,7,11],\"1\":[4,6,14,15,17,21,22,23,32,33,34,36,37,39,40,41,43],\"2\":[20,22,23,29,30,31,48,50,51,52,53,55,65,66,67,72,73,75,76,77,78,81,82,83,140,141,142,152,153,154,168,171],\"3\":[85,86,87,112,113,114,196,197,198,217,218,219,257,258,259,296,298,299,316,317,319,320,321,323,572,574,575,620,622,623,676,677,679,680,682,683],\"4\":[337,338,339,460,462,463,796,797,798,864,865,866,1025,1026,1027,1188,1189,1191,1272,1274,1275,1289,1290,1291,2292,2294,2295,2484,2486,2487,2712,2714,2715,2724,2725,2727],\"5\":[1344,1345,1347,1844,1845,1846,3197,3198,3199,3469,3470,3471,4096,4097,4098,4760,4761,4763,5092,5093,5094,5152,5153,5155,9172,9173,9175,9941,9942,9943,10852,10853,10854,10904,10906,10907],\"6\":[5384,5386,5387,7388,7390,7391,12785,12786,12787,13872,13873,13875,16396,16397,16399,19048,19049,19050,20380,20381,20383,20616,20617,20618,36696,36698,36699,39760,39762,39763,43420,43422,43423,43620,43621,43623]}",
+  )
+}
+
+///|
+test "moc oracle set-18-union" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 8/151531 231062 242186 346230 354348 360554 373269 438979 493750 527911 530562 590288 603542 752013 784577",
+    limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 7/14803 34942 47765 59415 70127 95620 96104 105166 112756 113714 119339 138187 148292 166145 180191",
+    limits,
+  )
+  let actual = a.union(b, limits)
+  moc_oracle_assert(
+    "set-18-union",
+    actual,
+    8,
+    [
+      (0, 67108864),
+      (143122432, 143126528),
+      (155167744, 155168768),
+      (195645440, 195649536),
+      (236607488, 236608512),
+      (243363840, 243367936),
+      (247998464, 247999488),
+      (287240192, 287244288),
+      (354539520, 354540544),
+      (362852352, 362853376),
+      (369207296, 369208320),
+      (382227456, 382228480),
+      (391659520, 391663616),
+      (393641984, 393646080),
+      (430759936, 430764032),
+      (449514496, 449515520),
+      (461848576, 461852672),
+      (465772544, 465776640),
+      (488812544, 488816640),
+      (505600000, 505601024),
+      (540580864, 540581888),
+      (543295488, 543296512),
+      (566013952, 566018048),
+      (604454912, 604455936),
+      (607404032, 607408128),
+      (618027008, 618028032),
+      (680529920, 680534016),
+      (738062336, 738066432),
+      (770061312, 770062336),
+      (803406848, 803407872),
+    ],
+    [
+      4, 100478, 113301, 124951, 135663, 161156, 161640, 170702, 178292, 179250,
+      184875, 203723, 213828, 231681, 245727, 413675, 493206, 504330, 608374, 616492,
+      622698, 635413, 701123, 755894, 790055, 792706, 852432, 865686, 1014157, 1046721,
+    ],
+    "0/0 7/34942 47765 59415 70127 95620 96104 105166 112756 113714 119339 138187 148292 166145 180191 8/151531 231062 242186 346230 354348 360554 373269 438979 493750 527911 530562 590288 603542 752013 784577",
+    "{\"0\":[0],\"7\":[34942,47765,59415,70127,95620,96104,105166,112756,113714,119339,138187,148292,166145,180191],\"8\":[151531,231062,242186,346230,354348,360554,373269,438979,493750,527911,530562,590288,603542,752013,784577]}",
+  )
+}
+
+///|
+test "moc oracle set-18-intersection" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 8/151531 231062 242186 346230 354348 360554 373269 438979 493750 527911 530562 590288 603542 752013 784577",
+    limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 7/14803 34942 47765 59415 70127 95620 96104 105166 112756 113714 119339 138187 148292 166145 180191",
+    limits,
+  )
+  let actual = a.intersection(b, limits)
+  moc_oracle_assert(
+    "set-18-intersection",
+    actual,
+    8,
+    [(0, 33554432), (60633088, 60637184)],
+    [16, 17, 80339],
+    "1/0-1 7/14803 8/",
+    "{\"1\":[0,1],\"7\":[14803],\"8\":[]}",
+  )
+}
+
+///|
+test "moc oracle set-18-difference" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 8/151531 231062 242186 346230 354348 360554 373269 438979 493750 527911 530562 590288 603542 752013 784577",
+    limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 7/14803 34942 47765 59415 70127 95620 96104 105166 112756 113714 119339 138187 148292 166145 180191",
+    limits,
+  )
+  let actual = a.difference(b, limits)
+  moc_oracle_assert(
+    "set-18-difference",
+    actual,
+    8,
+    [
+      (33554432, 60633088),
+      (60637184, 67108864),
+      (155167744, 155168768),
+      (236607488, 236608512),
+      (247998464, 247999488),
+      (354539520, 354540544),
+      (362852352, 362853376),
+      (369207296, 369208320),
+      (382227456, 382228480),
+      (449514496, 449515520),
+      (505600000, 505601024),
+      (540580864, 540581888),
+      (543295488, 543296512),
+      (604454912, 604455936),
+      (618027008, 618028032),
+      (770061312, 770062336),
+      (803406848, 803407872),
+    ],
+    [
+      18, 76, 77, 79, 312, 314, 315, 1252, 1253, 1254, 5020, 5022, 5023, 20085, 20086,
+      20087, 80336, 80337, 80338, 413675, 493206, 504330, 608374, 616492, 622698,
+      635413, 701123, 755894, 790055, 792706, 852432, 865686, 1014157, 1046721,
+    ],
+    "1/2 2/12-13 15 3/56 58-59 4/228-230 5/924 926-927 6/3701-3703 7/14800-14802 8/151531 231062 242186 346230 354348 360554 373269 438979 493750 527911 530562 590288 603542 752013 784577",
+    "{\"1\":[2],\"2\":[12,13,15],\"3\":[56,58,59],\"4\":[228,229,230],\"5\":[924,926,927],\"6\":[3701,3702,3703],\"7\":[14800,14801,14802],\"8\":[151531,231062,242186,346230,354348,360554,373269,438979,493750,527911,530562,590288,603542,752013,784577]}",
+  )
+}
+
+///|
+test "moc oracle set-18-complement" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 8/151531 231062 242186 346230 354348 360554 373269 438979 493750 527911 530562 590288 603542 752013 784577",
+    limits,
+  )
+  let actual = a.complement(limits)
+  moc_oracle_assert(
+    "set-18-complement",
+    actual,
+    8,
+    [
+      (67108864, 155167744),
+      (155168768, 236607488),
+      (236608512, 247998464),
+      (247999488, 354539520),
+      (354540544, 362852352),
+      (362853376, 369207296),
+      (369208320, 382227456),
+      (382228480, 449514496),
+      (449515520, 505600000),
+      (505601024, 540580864),
+      (540581888, 543295488),
+      (543296512, 604454912),
+      (604455936, 618027008),
+      (618028032, 770061312),
+      (770062336, 803406848),
+      (803407872, 805306368),
+    ],
+    [
+      5, 8, 14, 24, 26, 27, 28, 29, 31, 36, 39, 40, 41, 43, 44, 45, 47, 49, 50, 51,
+      53, 54, 55, 60, 62, 101, 102, 103, 121, 122, 149, 151, 153, 154, 168, 169,
+      170, 185, 186, 187, 194, 195, 209, 210, 244, 245, 246, 252, 253, 254, 400,
+      401, 402, 480, 482, 483, 493, 494, 495, 592, 593, 595, 600, 601, 603, 609,
+      610, 611, 621, 622, 623, 685, 686, 687, 736, 737, 739, 768, 769, 770, 772,
+      773, 775, 833, 834, 835, 844, 846, 847, 988, 989, 991, 1020, 1021, 1023, 1612,
+      1613, 1614, 1924, 1925, 1927, 1968, 1969, 1971, 2377, 2378, 2379, 2409, 2410,
+      2411, 2433, 2434, 2435, 2480, 2481, 2483, 2736, 2737, 2739, 2953, 2954, 2955,
+      3084, 3085, 3087, 3097, 3098, 3099, 3328, 3330, 3331, 3380, 3382, 3383, 3960,
+      3962, 3963, 4089, 4090, 4091, 6460, 6461, 6462, 7704, 7705, 7707, 7881, 7882,
+      7883, 9504, 9506, 9507, 9633, 9634, 9635, 9728, 9730, 9731, 9929, 9930, 9931,
+      10952, 10953, 10954, 11808, 11809, 11811, 12345, 12346, 12347, 12384, 12385,
+      12387, 13316, 13317, 13318, 13524, 13525, 13527, 15844, 15845, 15847, 16352,
+      16353, 16354, 25852, 25853, 25855, 30824, 30826, 30827, 31521, 31522, 31523,
+      38020, 38021, 38022, 38528, 38529, 38531, 38916, 38917, 38919, 39712, 39714,
+      39715, 43821, 43822, 43823, 47240, 47241, 47242, 49376, 49377, 49379, 49545,
+      49546, 49547, 53276, 53278, 53279, 54104, 54106, 54107, 63385, 63386, 63387,
+      65421, 65422, 65423, 103416, 103417, 103419, 123300, 123302, 123303, 126080,
+      126081, 126083, 152092, 152094, 152095, 154120, 154121, 154122, 155672, 155673,
+      155675, 158852, 158854, 158855, 175281, 175282, 175283, 188972, 188974, 188975,
+      197512, 197514, 197515, 198177, 198178, 198179, 213109, 213110, 213111, 216420,
+      216422, 216423, 253536, 253537, 253538, 261681, 261682, 261683, 413672, 413673,
+      413674, 493204, 493205, 493207, 504328, 504329, 504331, 608372, 608373, 608375,
+      616493, 616494, 616495, 622696, 622697, 622699, 635412, 635414, 635415, 701120,
+      701121, 701122, 755892, 755893, 755895, 790052, 790053, 790054, 792704, 792705,
+      792707, 852433, 852434, 852435, 865684, 865685, 865687, 1014156, 1014158, 1014159,
+      1046720, 1046722, 1046723,
+    ],
+    "0/1 4 10 1/8 10-13 15 20 23-25 27-29 31 33-35 37-39 44 46 2/37-39 57-58 85 87 89-90 104-106 121-123 130-131 145-146 180-182 188-190 3/144-146 224 226-227 237-239 336-337 339 344-345 347 353-355 365-367 429-431 480-481 483 512-514 516-517 519 577-579 588 590-591 732-733 735 764-765 767 4/588-590 900-901 903 944-945 947 1353-1355 1385-1387 1409-1411 1456-1457 1459 1712-1713 1715 1929-1931 2060-2061 2063 2073-2075 2304 2306-2307 2356 2358-2359 2936 2938-2939 3065-3067 5/2364-2366 3608-3609 3611 3785-3787 5408 5410-5411 5537-5539 5632 5634-5635 5833-5835 6856-6858 7712-7713 7715 8249-8251 8288-8289 8291 9220-9222 9428-9429 9431 11748-11749 11751 12256-12258 6/9468-9469 9471 14440 14442-14443 15137-15139 21636-21638 22144-22145 22147 22532-22533 22535 23328 23330-23331 27437-27439 30856-30858 32992-32993 32995 33161-33163 36892 36894-36895 37720 37722-37723 47001-47003 49037-49039 7/37880-37881 37883 57764 57766-57767 60544-60545 60547 86556 86558-86559 88584-88586 90136-90137 90139 93316 93318-93319 109745-109747 123436 123438-123439 131976 131978-131979 132641-132643 147573-147575 150884 150886-150887 188000-188002 196145-196147 8/151528-151530 231060-231061 231063 242184-242185 242187 346228-346229 346231 354349-354351 360552-360553 360555 373268 373270-373271 438976-438978 493748-493749 493751 527908-527910 530560-530561 530563 590289-590291 603540-603541 603543 752012 752014-752015 784576 784578-784579",
+    "{\"0\":[1,4,10],\"1\":[8,10,11,12,13,15,20,23,24,25,27,28,29,31,33,34,35,37,38,39,44,46],\"2\":[37,38,39,57,58,85,87,89,90,104,105,106,121,122,123,130,131,145,146,180,181,182,188,189,190],\"3\":[144,145,146,224,226,227,237,238,239,336,337,339,344,345,347,353,354,355,365,366,367,429,430,431,480,481,483,512,513,514,516,517,519,577,578,579,588,590,591,732,733,735,764,765,767],\"4\":[588,589,590,900,901,903,944,945,947,1353,1354,1355,1385,1386,1387,1409,1410,1411,1456,1457,1459,1712,1713,1715,1929,1930,1931,2060,2061,2063,2073,2074,2075,2304,2306,2307,2356,2358,2359,2936,2938,2939,3065,3066,3067],\"5\":[2364,2365,2366,3608,3609,3611,3785,3786,3787,5408,5410,5411,5537,5538,5539,5632,5634,5635,5833,5834,5835,6856,6857,6858,7712,7713,7715,8249,8250,8251,8288,8289,8291,9220,9221,9222,9428,9429,9431,11748,11749,11751,12256,12257,12258],\"6\":[9468,9469,9471,14440,14442,14443,15137,15138,15139,21636,21637,21638,22144,22145,22147,22532,22533,22535,23328,23330,23331,27437,27438,27439,30856,30857,30858,32992,32993,32995,33161,33162,33163,36892,36894,36895,37720,37722,37723,47001,47002,47003,49037,49038,49039],\"7\":[37880,37881,37883,57764,57766,57767,60544,60545,60547,86556,86558,86559,88584,88585,88586,90136,90137,90139,93316,93318,93319,109745,109746,109747,123436,123438,123439,131976,131978,131979,132641,132642,132643,147573,147574,147575,150884,150886,150887,188000,188001,188002,196145,196146,196147],\"8\":[151528,151529,151530,231060,231061,231063,242184,242185,242187,346228,346229,346231,354349,354350,354351,360552,360553,360555,373268,373270,373271,438976,438977,438978,493748,493749,493751,527908,527909,527910,530560,530561,530563,590289,590290,590291,603540,603541,603543,752012,752014,752015,784576,784578,784579]}",
+  )
+}
+
+///|
+test "moc oracle set-19-union" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 8/196807 209859 209995 225050 267095 315985 340441 424764 430752 495710 541207 548931 563640 623581 719929",
+    limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 7/24557 25596 27168 29266 36485 46862 59740 73709 84720 98422 114294 115266 143896 178762 184185",
+    limits,
+  )
+  let actual = a.union(b, limits)
+  moc_oracle_assert(
+    "set-19-union",
+    actual,
+    8,
+    [
+      (0, 67108864),
+      (100585472, 100589568),
+      (104841216, 104845312),
+      (111280128, 111284224),
+      (119873536, 119877632),
+      (149442560, 149446656),
+      (191946752, 191950848),
+      (201530368, 201531392),
+      (214895616, 214896640),
+      (215034880, 215035904),
+      (230451200, 230452224),
+      (244695040, 244699136),
+      (273505280, 273506304),
+      (301912064, 301916160),
+      (323568640, 323569664),
+      (347013120, 347017216),
+      (348611584, 348612608),
+      (403136512, 403140608),
+      (434958336, 434959360),
+      (441090048, 441091072),
+      (468148224, 468152320),
+      (472129536, 472133632),
+      (507607040, 507608064),
+      (554195968, 554196992),
+      (562105344, 562106368),
+      (577167360, 577168384),
+      (589398016, 589402112),
+      (638546944, 638547968),
+      (732209152, 732213248),
+      (737207296, 737208320),
+      (754421760, 754425856),
+    ],
+    [
+      4, 90093, 91132, 92704, 94802, 102021, 112398, 125276, 139245, 150256, 163958,
+      179830, 180802, 209432, 244298, 249721, 458951, 472003, 472139, 487194, 529239,
+      578129, 602585, 686908, 692896, 757854, 803351, 811075, 825784, 885725, 982073,
+    ],
+    "0/0 7/24557 25596 27168 29266 36485 46862 59740 73709 84720 98422 114294 115266 143896 178762 184185 8/196807 209859 209995 225050 267095 315985 340441 424764 430752 495710 541207 548931 563640 623581 719929",
+    "{\"0\":[0],\"7\":[24557,25596,27168,29266,36485,46862,59740,73709,84720,98422,114294,115266,143896,178762,184185],\"8\":[196807,209859,209995,225050,267095,315985,340441,424764,430752,495710,541207,548931,563640,623581,719929]}",
+  )
+}
+
+///|
+test "moc oracle set-19-intersection" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 8/196807 209859 209995 225050 267095 315985 340441 424764 430752 495710 541207 548931 563640 623581 719929",
+    limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 7/24557 25596 27168 29266 36485 46862 59740 73709 84720 98422 114294 115266 143896 178762 184185",
+    limits,
+  )
+  let actual = a.intersection(b, limits)
+  moc_oracle_assert(
+    "set-19-intersection",
+    actual,
+    8,
+    [(0, 33554432)],
+    [16, 17],
+    "1/0-1 8/",
+    "{\"1\":[0,1],\"8\":[]}",
+  )
+}
+
+///|
+test "moc oracle set-19-difference" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 8/196807 209859 209995 225050 267095 315985 340441 424764 430752 495710 541207 548931 563640 623581 719929",
+    limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 7/24557 25596 27168 29266 36485 46862 59740 73709 84720 98422 114294 115266 143896 178762 184185",
+    limits,
+  )
+  let actual = a.difference(b, limits)
+  moc_oracle_assert(
+    "set-19-difference",
+    actual,
+    8,
+    [
+      (33554432, 67108864),
+      (201530368, 201531392),
+      (214895616, 214896640),
+      (215034880, 215035904),
+      (230451200, 230452224),
+      (273505280, 273506304),
+      (323568640, 323569664),
+      (348611584, 348612608),
+      (434958336, 434959360),
+      (441090048, 441091072),
+      (507607040, 507608064),
+      (554195968, 554196992),
+      (562105344, 562106368),
+      (577167360, 577168384),
+      (638546944, 638547968),
+      (737207296, 737208320),
+    ],
+    [
+      18, 19, 458951, 472003, 472139, 487194, 529239, 578129, 602585, 686908, 692896,
+      757854, 803351, 811075, 825784, 885725, 982073,
+    ],
+    "1/2-3 8/196807 209859 209995 225050 267095 315985 340441 424764 430752 495710 541207 548931 563640 623581 719929",
+    "{\"1\":[2,3],\"8\":[196807,209859,209995,225050,267095,315985,340441,424764,430752,495710,541207,548931,563640,623581,719929]}",
+  )
+}
+
+///|
+test "moc oracle set-19-complement" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 8/196807 209859 209995 225050 267095 315985 340441 424764 430752 495710 541207 548931 563640 623581 719929",
+    limits,
+  )
+  let actual = a.complement(limits)
+  moc_oracle_assert(
+    "set-19-complement",
+    actual,
+    8,
+    [
+      (67108864, 201530368),
+      (201531392, 214895616),
+      (214896640, 215034880),
+      (215035904, 230451200),
+      (230452224, 273505280),
+      (273506304, 323568640),
+      (323569664, 348611584),
+      (348612608, 434958336),
+      (434959360, 441090048),
+      (441091072, 507607040),
+      (507608064, 554195968),
+      (554196992, 562105344),
+      (562106368, 577167360),
+      (577168384, 638546944),
+      (638547968, 737207296),
+      (737208320, 805306368),
+    ],
+    [
+      5, 6, 15, 30, 31, 33, 34, 37, 38, 39, 40, 43, 44, 45, 47, 48, 51, 52, 53, 55,
+      56, 57, 58, 113, 114, 116, 117, 119, 128, 130, 131, 140, 142, 143, 144, 145,
+      146, 164, 165, 166, 168, 170, 171, 184, 186, 187, 197, 199, 200, 202, 203,
+      217, 218, 219, 236, 237, 238, 449, 450, 451, 462, 463, 472, 473, 474, 517,
+      518, 519, 565, 566, 567, 589, 590, 591, 668, 669, 671, 677, 678, 679, 741,
+      742, 743, 785, 786, 787, 793, 794, 795, 804, 805, 807, 865, 866, 867, 956,
+      957, 958, 1793, 1794, 1795, 1840, 1841, 1842, 1845, 1846, 1847, 1900, 1901,
+      1902, 2064, 2065, 2066, 2256, 2257, 2259, 2352, 2354, 2355, 2680, 2681, 2682,
+      2704, 2705, 2707, 2961, 2962, 2963, 3136, 3137, 3139, 3169, 3170, 3171, 3224,
+      3226, 3227, 3456, 3457, 3458, 3837, 3838, 3839, 7168, 7169, 7170, 7372, 7373,
+      7374, 7376, 7378, 7379, 7613, 7614, 7615, 8268, 8270, 8271, 9032, 9034, 9035,
+      9412, 9413, 9414, 10733, 10734, 10735, 10824, 10825, 10827, 11840, 11842, 11843,
+      12553, 12554, 12555, 12672, 12674, 12675, 12900, 12901, 12903, 13836, 13837,
+      13838, 15345, 15346, 15347, 28685, 28686, 28687, 29501, 29502, 29503, 29509,
+      29510, 29511, 30448, 30450, 30451, 33076, 33078, 33079, 36132, 36134, 36135,
+      37660, 37662, 37663, 42928, 42929, 42930, 43304, 43305, 43307, 47364, 47366,
+      47367, 50208, 50210, 50211, 50693, 50694, 50695, 51608, 51609, 51610, 55356,
+      55358, 55359, 61376, 61377, 61378, 114736, 114738, 114739, 118001, 118002,
+      118003, 118032, 118033, 118035, 121796, 121797, 121799, 132308, 132310, 132311,
+      144533, 144534, 144535, 150644, 150645, 150647, 171724, 171725, 171726, 173225,
+      173226, 173227, 189460, 189461, 189462, 200836, 200838, 200839, 202769, 202770,
+      202771, 206444, 206445, 206447, 221428, 221429, 221430, 245516, 245517, 245519,
+      458948, 458949, 458950, 472000, 472001, 472002, 472136, 472137, 472138, 487192,
+      487193, 487195, 529236, 529237, 529238, 578128, 578130, 578131, 602584, 602586,
+      602587, 686909, 686910, 686911, 692897, 692898, 692899, 757852, 757853, 757855,
+      803348, 803349, 803350, 811072, 811073, 811074, 825785, 825786, 825787, 885724,
+      885726, 885727, 982072, 982074, 982075,
+    ],
+    "0/1-2 11 1/14-15 17-18 21-24 27-29 31-32 35-37 39-42 2/49-50 52-53 55 64 66-67 76 78-82 100-102 104 106-107 120 122-123 133 135-136 138-139 153-155 172-174 3/193-195 206-207 216-218 261-263 309-311 333-335 412-413 415 421-423 485-487 529-531 537-539 548-549 551 609-611 700-702 4/769-771 816-818 821-823 876-878 1040-1042 1232-1233 1235 1328 1330-1331 1656-1658 1680-1681 1683 1937-1939 2112-2113 2115 2145-2147 2200 2202-2203 2432-2434 2813-2815 5/3072-3074 3276-3278 3280 3282-3283 3517-3519 4172 4174-4175 4936 4938-4939 5316-5318 6637-6639 6728-6729 6731 7744 7746-7747 8457-8459 8576 8578-8579 8804-8805 8807 9740-9742 11249-11251 6/12301-12303 13117-13119 13125-13127 14064 14066-14067 16692 16694-16695 19748 19750-19751 21276 21278-21279 26544-26546 26920-26921 26923 30980 30982-30983 33824 33826-33827 34309-34311 35224-35226 38972 38974-38975 44992-44994 7/49200 49202-49203 52465-52467 52496-52497 52499 56260-56261 56263 66772 66774-66775 78997-78999 85108-85109 85111 106188-106190 107689-107691 123924-123926 135300 135302-135303 137233-137235 140908-140909 140911 155892-155894 179980-179981 179983 8/196804-196806 209856-209858 209992-209994 225048-225049 225051 267092-267094 315984 315986-315987 340440 340442-340443 424765-424767 430753-430755 495708-495709 495711 541204-541206 548928-548930 563641-563643 623580 623582-623583 719928 719930-719931",
+    "{\"0\":[1,2,11],\"1\":[14,15,17,18,21,22,23,24,27,28,29,31,32,35,36,37,39,40,41,42],\"2\":[49,50,52,53,55,64,66,67,76,78,79,80,81,82,100,101,102,104,106,107,120,122,123,133,135,136,138,139,153,154,155,172,173,174],\"3\":[193,194,195,206,207,216,217,218,261,262,263,309,310,311,333,334,335,412,413,415,421,422,423,485,486,487,529,530,531,537,538,539,548,549,551,609,610,611,700,701,702],\"4\":[769,770,771,816,817,818,821,822,823,876,877,878,1040,1041,1042,1232,1233,1235,1328,1330,1331,1656,1657,1658,1680,1681,1683,1937,1938,1939,2112,2113,2115,2145,2146,2147,2200,2202,2203,2432,2433,2434,2813,2814,2815],\"5\":[3072,3073,3074,3276,3277,3278,3280,3282,3283,3517,3518,3519,4172,4174,4175,4936,4938,4939,5316,5317,5318,6637,6638,6639,6728,6729,6731,7744,7746,7747,8457,8458,8459,8576,8578,8579,8804,8805,8807,9740,9741,9742,11249,11250,11251],\"6\":[12301,12302,12303,13117,13118,13119,13125,13126,13127,14064,14066,14067,16692,16694,16695,19748,19750,19751,21276,21278,21279,26544,26545,26546,26920,26921,26923,30980,30982,30983,33824,33826,33827,34309,34310,34311,35224,35225,35226,38972,38974,38975,44992,44993,44994],\"7\":[49200,49202,49203,52465,52466,52467,52496,52497,52499,56260,56261,56263,66772,66774,66775,78997,78998,78999,85108,85109,85111,106188,106189,106190,107689,107690,107691,123924,123925,123926,135300,135302,135303,137233,137234,137235,140908,140909,140911,155892,155893,155894,179980,179981,179983],\"8\":[196804,196805,196806,209856,209857,209858,209992,209993,209994,225048,225049,225051,267092,267093,267094,315984,315986,315987,340440,340442,340443,424765,424766,424767,430753,430754,430755,495708,495709,495711,541204,541205,541206,548928,548929,548930,563641,563642,563643,623580,623582,623583,719928,719930,719931]}",
+  )
+}
+
+///|
+test "moc oracle set-20-union" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 9/287431 756369 814229 1239602 1671335 1695859 1945129 2033615 2123357 2130214 2147963 2532421 2832885 3059256",
+    limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 10/2165660 2329544 2529690 3071304 3284714 3353157 3447857 5089913 5343079 5482426 6352004 6805037 7158902 7531614 10053730 11938246",
+    limits,
+  )
+  let actual = a.union(b, limits)
+  moc_oracle_assert(
+    "set-20-union",
+    actual,
+    10,
+    [
+      (0, 67108864),
+      (73582336, 73582592),
+      (138602240, 138602304),
+      (149090816, 149090880),
+      (161900160, 161900224),
+      (193630464, 193630720),
+      (196563456, 196563520),
+      (208442624, 208442880),
+      (210221696, 210221760),
+      (214602048, 214602112),
+      (220662848, 220662912),
+      (317338112, 317338368),
+      (325754432, 325754496),
+      (341957056, 341957120),
+      (350875264, 350875328),
+      (406528256, 406528320),
+      (427861760, 427862016),
+      (434139904, 434140160),
+      (435522368, 435522432),
+      (458169728, 458169792),
+      (482023296, 482023360),
+      (497953024, 497953280),
+      (520605440, 520605696),
+      (543579392, 543579648),
+      (545334784, 545335040),
+      (549878528, 549878784),
+      (643438720, 643438784),
+      (648299776, 648300032),
+      (725218560, 725218816),
+      (764047744, 764047808),
+      (783169536, 783169792),
+    ],
+    [
+      4, 1336007, 1804945, 1862805, 2288178, 2719911, 2744435, 2993705, 3082191,
+      3171933, 3178790, 3196539, 3580997, 3881461, 4107832, 6359964, 6523848, 6723994,
+      7265608, 7479018, 7547461, 7642161, 9284217, 9537383, 9676730, 10546308, 10999341,
+      11353206, 11725918, 14248034, 16132550,
+    ],
+    "0/0 9/287431 756369 814229 1239602 1671335 1695859 1945129 2033615 2123357 2130214 2147963 2532421 2832885 3059256 10/2165660 2329544 2529690 3071304 3284714 3353157 3447857 5089913 5343079 5482426 6352004 6805037 7158902 7531614 10053730 11938246",
+    "{\"0\":[0],\"9\":[287431,756369,814229,1239602,1671335,1695859,1945129,2033615,2123357,2130214,2147963,2532421,2832885,3059256],\"10\":[2165660,2329544,2529690,3071304,3284714,3353157,3447857,5089913,5343079,5482426,6352004,6805037,7158902,7531614,10053730,11938246]}",
+  )
+}
+
+///|
+test "moc oracle set-20-intersection" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 9/287431 756369 814229 1239602 1671335 1695859 1945129 2033615 2123357 2130214 2147963 2532421 2832885 3059256",
+    limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 10/2165660 2329544 2529690 3071304 3284714 3353157 3447857 5089913 5343079 5482426 6352004 6805037 7158902 7531614 10053730 11938246",
+    limits,
+  )
+  let actual = a.intersection(b, limits)
+  moc_oracle_assert(
+    "set-20-intersection",
+    actual,
+    10,
+    [(0, 33554432)],
+    [16, 17],
+    "1/0-1 10/",
+    "{\"1\":[0,1],\"10\":[]}",
+  )
+}
+
+///|
+test "moc oracle set-20-difference" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 9/287431 756369 814229 1239602 1671335 1695859 1945129 2033615 2123357 2130214 2147963 2532421 2832885 3059256",
+    limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 10/2165660 2329544 2529690 3071304 3284714 3353157 3447857 5089913 5343079 5482426 6352004 6805037 7158902 7531614 10053730 11938246",
+    limits,
+  )
+  let actual = a.difference(b, limits)
+  moc_oracle_assert(
+    "set-20-difference",
+    actual,
+    10,
+    [
+      (33554432, 67108864),
+      (73582336, 73582592),
+      (193630464, 193630720),
+      (208442624, 208442880),
+      (317338112, 317338368),
+      (427861760, 427862016),
+      (434139904, 434140160),
+      (497953024, 497953280),
+      (520605440, 520605696),
+      (543579392, 543579648),
+      (545334784, 545335040),
+      (549878528, 549878784),
+      (648299776, 648300032),
+      (725218560, 725218816),
+      (783169536, 783169792),
+    ],
+    [
+      18, 19, 1336007, 1804945, 1862805, 2288178, 2719911, 2744435, 2993705, 3082191,
+      3171933, 3178790, 3196539, 3580997, 3881461, 4107832,
+    ],
+    "1/2-3 9/287431 756369 814229 1239602 1671335 1695859 1945129 2033615 2123357 2130214 2147963 2532421 2832885 3059256 10/",
+    "{\"1\":[2,3],\"9\":[287431,756369,814229,1239602,1671335,1695859,1945129,2033615,2123357,2130214,2147963,2532421,2832885,3059256],\"10\":[]}",
+  )
+}
+
+///|
+test "moc oracle set-20-complement" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 9/287431 756369 814229 1239602 1671335 1695859 1945129 2033615 2123357 2130214 2147963 2532421 2832885 3059256",
+    limits,
+  )
+  let actual = a.complement(limits)
+  moc_oracle_assert(
+    "set-20-complement",
+    actual,
+    9,
+    [
+      (67108864, 73582336),
+      (73582592, 193630464),
+      (193630720, 208442624),
+      (208442880, 317338112),
+      (317338368, 427861760),
+      (427862016, 434139904),
+      (434140160, 497953024),
+      (497953280, 520605440),
+      (520605696, 543579392),
+      (543579648, 545334784),
+      (545335040, 549878528),
+      (549878784, 648299776),
+      (648300032, 725218560),
+      (725218816, 783169536),
+      (783169792, 805306368),
+    ],
+    [
+      9, 21, 22, 23, 24, 25, 26, 29, 30, 31, 32, 33, 35, 40, 42, 43, 44, 46, 49,
+      50, 51, 52, 53, 55, 56, 57, 58, 60, 61, 63, 80, 82, 83, 108, 109, 111, 112,
+      114, 115, 136, 137, 138, 164, 165, 180, 181, 183, 189, 190, 191, 192, 216,
+      217, 219, 237, 238, 239, 248, 249, 251, 324, 325, 327, 441, 442, 443, 452,
+      453, 455, 556, 557, 559, 665, 666, 667, 668, 669, 671, 728, 729, 731, 753,
+      754, 755, 772, 773, 775, 777, 778, 779, 781, 782, 783, 872, 873, 875, 944,
+      945, 946, 1000, 1001, 1003, 1305, 1306, 1307, 1760, 1761, 1763, 1816, 1817,
+      1818, 2232, 2233, 2235, 2657, 2658, 2659, 2681, 2682, 2683, 2920, 2921, 2922,
+      3008, 3010, 3011, 3096, 3098, 3099, 3105, 3106, 3107, 3120, 3122, 3123, 3496,
+      3498, 3499, 3788, 3789, 3791, 4008, 4009, 4010, 5216, 5217, 5219, 7048, 7049,
+      7051, 7277, 7278, 7279, 8936, 8937, 8939, 10625, 10626, 10627, 10721, 10722,
+      10723, 11692, 11693, 11695, 12036, 12037, 12038, 12388, 12389, 12391, 12416,
+      12418, 12419, 12484, 12485, 12487, 13989, 13990, 13991, 15160, 15162, 15163,
+      16044, 16045, 16047, 20872, 20873, 20874, 28200, 28201, 28203, 29104, 29105,
+      29107, 35753, 35754, 35755, 42496, 42497, 42499, 42880, 42882, 42883, 46777,
+      46778, 46779, 48156, 48157, 48158, 49560, 49562, 49563, 49669, 49670, 49671,
+      49944, 49946, 49947, 55952, 55954, 55955, 60644, 60645, 60646, 64185, 64186,
+      64187, 83501, 83502, 83503, 112808, 112810, 112811, 116424, 116426, 116427,
+      143008, 143009, 143010, 169992, 169993, 169995, 171524, 171525, 171526, 187104,
+      187105, 187107, 192637, 192638, 192639, 198244, 198246, 198247, 198672, 198673,
+      198675, 199780, 199781, 199782, 223813, 223814, 223815, 242588, 242589, 242590,
+      256736, 256737, 256738, 334000, 334002, 334003, 451237, 451238, 451239, 465700,
+      465702, 465703, 572045, 572046, 572047, 679976, 679978, 679979, 686109, 686110,
+      686111, 748424, 748425, 748427, 770544, 770545, 770546, 792980, 792981, 792982,
+      794696, 794698, 794699, 799132, 799133, 799135, 895248, 895250, 895251, 970364,
+      970366, 970367, 1026956, 1026957, 1026959, 1336004, 1336005, 1336006, 1804944,
+      1804946, 1804947, 1862804, 1862806, 1862807, 2288176, 2288177, 2288179, 2719908,
+      2719909, 2719910, 2744432, 2744433, 2744434, 2993704, 2993706, 2993707, 3082188,
+      3082189, 3082190, 3171932, 3171934, 3171935, 3178788, 3178789, 3178791, 3196536,
+      3196537, 3196538, 3580996, 3580998, 3580999, 3881460, 3881462, 3881463, 4107833,
+      4107834, 4107835,
+    ],
+    "0/5 1/5-10 13-17 19 24 26-28 30 33-37 39-42 44-45 47 2/16 18-19 44-45 47-48 50-51 72-74 100-101 116-117 119 125-128 152-153 155 173-175 184-185 187 3/68-69 71 185-187 196-197 199 300-301 303 409-413 415 472-473 475 497-499 516-517 519 521-523 525-527 616-617 619 688-690 744-745 747 4/281-283 736-737 739 792-794 1208-1209 1211 1633-1635 1657-1659 1896-1898 1984 1986-1987 2072 2074-2075 2081-2083 2096 2098-2099 2472 2474-2475 2764-2765 2767 2984-2986 5/1120-1121 1123 2952-2953 2955 3181-3183 4840-4841 4843 6529-6531 6625-6627 7596-7597 7599 7940-7942 8292-8293 8295 8320 8322-8323 8388-8389 8391 9893-9895 11064 11066-11067 11948-11949 11951 6/4488-4490 11816-11817 11819 12720-12721 12723 19369-19371 26112-26113 26115 26496 26498-26499 30393-30395 31772-31774 33176 33178-33179 33285-33287 33560 33562-33563 39568 39570-39571 44260-44262 47801-47803 7/17965-17967 47272 47274-47275 50888 50890-50891 77472-77474 104456-104457 104459 105988-105990 121568-121569 121571 127101-127103 132708 132710-132711 133136-133137 133139 134244-134246 158277-158279 177052-177054 191200-191202 8/71856 71858-71859 189093-189095 203556 203558-203559 309901-309903 417832 417834-417835 423965-423967 486280-486281 486283 508400-508402 530836-530838 532552 532554-532555 536988-536989 536991 633104 633106-633107 708220 708222-708223 764812-764813 764815 9/287428-287430 756368 756370-756371 814228 814230-814231 1239600-1239601 1239603 1671332-1671334 1695856-1695858 1945128 1945130-1945131 2033612-2033614 2123356 2123358-2123359 2130212-2130213 2130215 2147960-2147962 2532420 2532422-2532423 2832884 2832886-2832887 3059257-3059259",
+    "{\"0\":[5],\"1\":[5,6,7,8,9,10,13,14,15,16,17,19,24,26,27,28,30,33,34,35,36,37,39,40,41,42,44,45,47],\"2\":[16,18,19,44,45,47,48,50,51,72,73,74,100,101,116,117,119,125,126,127,128,152,153,155,173,174,175,184,185,187],\"3\":[68,69,71,185,186,187,196,197,199,300,301,303,409,410,411,412,413,415,472,473,475,497,498,499,516,517,519,521,522,523,525,526,527,616,617,619,688,689,690,744,745,747],\"4\":[281,282,283,736,737,739,792,793,794,1208,1209,1211,1633,1634,1635,1657,1658,1659,1896,1897,1898,1984,1986,1987,2072,2074,2075,2081,2082,2083,2096,2098,2099,2472,2474,2475,2764,2765,2767,2984,2985,2986],\"5\":[1120,1121,1123,2952,2953,2955,3181,3182,3183,4840,4841,4843,6529,6530,6531,6625,6626,6627,7596,7597,7599,7940,7941,7942,8292,8293,8295,8320,8322,8323,8388,8389,8391,9893,9894,9895,11064,11066,11067,11948,11949,11951],\"6\":[4488,4489,4490,11816,11817,11819,12720,12721,12723,19369,19370,19371,26112,26113,26115,26496,26498,26499,30393,30394,30395,31772,31773,31774,33176,33178,33179,33285,33286,33287,33560,33562,33563,39568,39570,39571,44260,44261,44262,47801,47802,47803],\"7\":[17965,17966,17967,47272,47274,47275,50888,50890,50891,77472,77473,77474,104456,104457,104459,105988,105989,105990,121568,121569,121571,127101,127102,127103,132708,132710,132711,133136,133137,133139,134244,134245,134246,158277,158278,158279,177052,177053,177054,191200,191201,191202],\"8\":[71856,71858,71859,189093,189094,189095,203556,203558,203559,309901,309902,309903,417832,417834,417835,423965,423966,423967,486280,486281,486283,508400,508401,508402,530836,530837,530838,532552,532554,532555,536988,536989,536991,633104,633106,633107,708220,708222,708223,764812,764813,764815],\"9\":[287428,287429,287430,756368,756370,756371,814228,814230,814231,1239600,1239601,1239603,1671332,1671333,1671334,1695856,1695857,1695858,1945128,1945130,1945131,2033612,2033613,2033614,2123356,2123358,2123359,2130212,2130213,2130215,2147960,2147961,2147962,2532420,2532422,2532423,2832884,2832886,2832887,3059257,3059258,3059259]}",
+  )
+}
+
+///|
+test "moc oracle set-21-union" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 9/896288 1090321 1176424 1229600 1569368 1687494 2033576 2139749 2421609 2443730 2503318 2637725 2816390 2861809 2871992",
+    limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 7/12099 14811 35683 48992 64411 65846 73751 89833 105972 111181 130853 134692 176829 183105 190469",
+    limits,
+  )
+  let actual = a.union(b, limits)
+  moc_oracle_assert(
+    "set-21-union",
+    actual,
+    9,
+    [
+      (0, 67108864),
+      (146157568, 146161664),
+      (200671232, 200675328),
+      (229449728, 229449984),
+      (263827456, 263831552),
+      (269705216, 269709312),
+      (279122176, 279122432),
+      (301164544, 301164800),
+      (302084096, 302088192),
+      (314777600, 314777856),
+      (367955968, 367960064),
+      (401758208, 401758464),
+      (431998464, 431998720),
+      (434061312, 434065408),
+      (455397376, 455401472),
+      (520595456, 520595712),
+      (535973888, 535977984),
+      (547775744, 547776000),
+      (551698432, 551702528),
+      (619931904, 619932160),
+      (625594880, 625595136),
+      (640849408, 640849664),
+      (675257600, 675257856),
+      (720995840, 720996096),
+      (724291584, 724295680),
+      (732623104, 732623360),
+      (735229952, 735230208),
+      (749998080, 750002176),
+      (780161024, 780165120),
+    ],
+    [
+      4, 101219, 114528, 129947, 131382, 139287, 155369, 171508, 176717, 196389,
+      200228, 242365, 248641, 256005, 1944864, 2138897, 2225000, 2278176, 2617944,
+      2736070, 3082152, 3188325, 3470185, 3492306, 3551894, 3686301, 3864966, 3910385,
+      3920568,
+    ],
+    "0/0 7/35683 48992 64411 65846 73751 89833 105972 111181 130853 134692 176829 183105 190469 9/896288 1090321 1176424 1229600 1569368 1687494 2033576 2139749 2421609 2443730 2503318 2637725 2816390 2861809 2871992",
+    "{\"0\":[0],\"7\":[35683,48992,64411,65846,73751,89833,105972,111181,130853,134692,176829,183105,190469],\"9\":[896288,1090321,1176424,1229600,1569368,1687494,2033576,2139749,2421609,2443730,2503318,2637725,2816390,2861809,2871992]}",
+  )
+}
+
+///|
+test "moc oracle set-21-intersection" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 9/896288 1090321 1176424 1229600 1569368 1687494 2033576 2139749 2421609 2443730 2503318 2637725 2816390 2861809 2871992",
+    limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 7/12099 14811 35683 48992 64411 65846 73751 89833 105972 111181 130853 134692 176829 183105 190469",
+    limits,
+  )
+  let actual = a.intersection(b, limits)
+  moc_oracle_assert(
+    "set-21-intersection",
+    actual,
+    9,
+    [(0, 33554432), (49557504, 49561600), (60665856, 60669952)],
+    [16, 17, 77635, 80347],
+    "1/0-1 7/12099 14811 9/",
+    "{\"1\":[0,1],\"7\":[12099,14811],\"9\":[]}",
+  )
+}
+
+///|
+test "moc oracle set-21-difference" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 9/896288 1090321 1176424 1229600 1569368 1687494 2033576 2139749 2421609 2443730 2503318 2637725 2816390 2861809 2871992",
+    limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 7/12099 14811 35683 48992 64411 65846 73751 89833 105972 111181 130853 134692 176829 183105 190469",
+    limits,
+  )
+  let actual = a.difference(b, limits)
+  moc_oracle_assert(
+    "set-21-difference",
+    actual,
+    9,
+    [
+      (33554432, 49557504),
+      (49561600, 60665856),
+      (60669952, 67108864),
+      (229449728, 229449984),
+      (279122176, 279122432),
+      (301164544, 301164800),
+      (314777600, 314777856),
+      (401758208, 401758464),
+      (431998464, 431998720),
+      (520595456, 520595712),
+      (547775744, 547776000),
+      (619931904, 619932160),
+      (625594880, 625595136),
+      (640849408, 640849664),
+      (675257600, 675257856),
+      (720995840, 720996096),
+      (732623104, 732623360),
+      (735229952, 735230208),
+    ],
+    [
+      72, 73, 74, 76, 77, 79, 300, 301, 302, 312, 314, 315, 1212, 1214, 1215, 1252,
+      1253, 1254, 4853, 4854, 4855, 5020, 5022, 5023, 19409, 19410, 19411, 20084,
+      20085, 20087, 77632, 77633, 77634, 80344, 80345, 80346, 1944864, 2138897, 2225000,
+      2278176, 2617944, 2736070, 3082152, 3188325, 3470185, 3492306, 3551894, 3686301,
+      3864966, 3910385, 3920568,
+    ],
+    "2/8-10 12-13 15 3/44-46 56 58-59 4/188 190-191 228-230 5/757-759 924 926-927 6/3025-3027 3700-3701 3703 7/12096-12098 14808-14810 9/896288 1090321 1176424 1229600 1569368 1687494 2033576 2139749 2421609 2443730 2503318 2637725 2816390 2861809 2871992",
+    "{\"2\":[8,9,10,12,13,15],\"3\":[44,45,46,56,58,59],\"4\":[188,190,191,228,229,230],\"5\":[757,758,759,924,926,927],\"6\":[3025,3026,3027,3700,3701,3703],\"7\":[12096,12097,12098,14808,14809,14810],\"9\":[896288,1090321,1176424,1229600,1569368,1687494,2033576,2139749,2421609,2443730,2503318,2637725,2816390,2861809,2871992]}",
+  )
+}
+
+///|
+test "moc oracle set-21-complement" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 9/896288 1090321 1176424 1229600 1569368 1687494 2033576 2139749 2421609 2443730 2503318 2637725 2816390 2861809 2871992",
+    limits,
+  )
+  let actual = a.complement(limits)
+  moc_oracle_assert(
+    "set-21-complement",
+    actual,
+    9,
+    [
+      (67108864, 229449728),
+      (229449984, 279122176),
+      (279122432, 301164544),
+      (301164800, 314777600),
+      (314777856, 401758208),
+      (401758464, 431998464),
+      (431998720, 520595456),
+      (520595712, 547775744),
+      (547776000, 619931904),
+      (619932160, 625594880),
+      (625595136, 640849408),
+      (640849664, 675257600),
+      (675257856, 720995840),
+      (720996096, 732623104),
+      (732623360, 735229952),
+      (735230208, 805306368),
+    ],
+    [
+      5, 6, 15, 28, 30, 31, 35, 36, 37, 38, 40, 42, 43, 44, 45, 46, 49, 50, 51, 55,
+      57, 116, 117, 119, 128, 129, 131, 132, 133, 134, 136, 137, 138, 156, 157, 158,
+      164, 165, 167, 189, 190, 191, 192, 193, 195, 208, 209, 210, 212, 214, 215,
+      217, 218, 219, 225, 226, 227, 232, 233, 234, 236, 237, 472, 473, 475, 520,
+      521, 523, 540, 541, 542, 557, 558, 559, 636, 637, 638, 664, 665, 666, 753,
+      754, 755, 776, 777, 779, 844, 845, 846, 853, 854, 855, 864, 865, 866, 896,
+      897, 898, 940, 941, 942, 952, 953, 955, 956, 958, 959, 1896, 1897, 1898, 2089,
+      2090, 2091, 2173, 2174, 2175, 2225, 2226, 2227, 2557, 2558, 2559, 2668, 2669,
+      2670, 3008, 3010, 3011, 3112, 3114, 3115, 3389, 3390, 3391, 3408, 3409, 3411,
+      3469, 3470, 3471, 3596, 3597, 3598, 3772, 3773, 3775, 3816, 3817, 3819, 3829,
+      3830, 3831, 7596, 7598, 7599, 8352, 8353, 8354, 8688, 8689, 8690, 8896, 8897,
+      8898, 10224, 10225, 10227, 10684, 10685, 10686, 12036, 12037, 12038, 12452,
+      12453, 12455, 13552, 13553, 13554, 13640, 13642, 13643, 13872, 13873, 13875,
+      14396, 14397, 14398, 15096, 15098, 15099, 15272, 15273, 15275, 15312, 15313,
+      15315, 30389, 30390, 30391, 33421, 33422, 33423, 34764, 34766, 34767, 35597,
+      35598, 35599, 40904, 40906, 40907, 42748, 42749, 42750, 48156, 48157, 48159,
+      49816, 49818, 49819, 54220, 54222, 54223, 54564, 54565, 54566, 55496, 55497,
+      55499, 57596, 57597, 57599, 60388, 60389, 60391, 61096, 61097, 61098, 61256,
+      61257, 61259, 121552, 121553, 121555, 133680, 133682, 133683, 139060, 139061,
+      139063, 142384, 142385, 142387, 163620, 163622, 163623, 171005, 171006, 171007,
+      192632, 192633, 192635, 199268, 199269, 199271, 216884, 216885, 216887, 218268,
+      218270, 218271, 221992, 221994, 221995, 230392, 230394, 230395, 241561, 241562,
+      241563, 244396, 244397, 244398, 245032, 245033, 245034, 486217, 486218, 486219,
+      534725, 534726, 534727, 556248, 556249, 556251, 569545, 569546, 569547, 654484,
+      654485, 654487, 684016, 684018, 684019, 770536, 770537, 770539, 797080, 797082,
+      797083, 867544, 867545, 867547, 873077, 873078, 873079, 887972, 887974, 887975,
+      921572, 921573, 921574, 966240, 966242, 966243, 977597, 977598, 977599, 980140,
+      980141, 980143, 1944865, 1944866, 1944867, 2138896, 2138898, 2138899, 2225001,
+      2225002, 2225003, 2278177, 2278178, 2278179, 2617945, 2617946, 2617947, 2736068,
+      2736069, 2736071, 3082153, 3082154, 3082155, 3188324, 3188326, 3188327, 3470184,
+      3470186, 3470187, 3492304, 3492305, 3492307, 3551892, 3551893, 3551895, 3686300,
+      3686302, 3686303, 3864964, 3864965, 3864967, 3910384, 3910386, 3910387, 3920569,
+      3920570, 3920571,
+    ],
+    "0/1-2 11 1/12 14-15 19-22 24 26-30 33-35 39 41 2/52-53 55 64-65 67-70 72-74 92-94 100-101 103 125-129 131 144-146 148 150-151 153-155 161-163 168-170 172-173 3/216-217 219 264-265 267 284-286 301-303 380-382 408-410 497-499 520-521 523 588-590 597-599 608-610 640-642 684-686 696-697 699-700 702-703 4/872-874 1065-1067 1149-1151 1201-1203 1533-1535 1644-1646 1984 1986-1987 2088 2090-2091 2365-2367 2384-2385 2387 2445-2447 2572-2574 2748-2749 2751 2792-2793 2795 2805-2807 5/3500 3502-3503 4256-4258 4592-4594 4800-4802 6128-6129 6131 6588-6590 7940-7942 8356-8357 8359 9456-9458 9544 9546-9547 9776-9777 9779 10300-10302 11000 11002-11003 11176-11177 11179 11216-11217 11219 6/14005-14007 17037-17039 18380 18382-18383 19213-19215 24520 24522-24523 26364-26366 31772-31773 31775 33432 33434-33435 37836 37838-37839 38180-38182 39112-39113 39115 41212-41213 41215 44004-44005 44007 44712-44714 44872-44873 44875 7/56016-56017 56019 68144 68146-68147 73524-73525 73527 76848-76849 76851 98084 98086-98087 105469-105471 127096-127097 127099 133732-133733 133735 151348-151349 151351 152732 152734-152735 156456 156458-156459 164856 164858-164859 176025-176027 178860-178862 179496-179498 8/224073-224075 272581-272583 294104-294105 294107 307401-307403 392340-392341 392343 421872 421874-421875 508392-508393 508395 534936 534938-534939 605400-605401 605403 610933-610935 625828 625830-625831 659428-659430 704096 704098-704099 715453-715455 717996-717997 717999 9/896289-896291 1090320 1090322-1090323 1176425-1176427 1229601-1229603 1569369-1569371 1687492-1687493 1687495 2033577-2033579 2139748 2139750-2139751 2421608 2421610-2421611 2443728-2443729 2443731 2503316-2503317 2503319 2637724 2637726-2637727 2816388-2816389 2816391 2861808 2861810-2861811 2871993-2871995",
+    "{\"0\":[1,2,11],\"1\":[12,14,15,19,20,21,22,24,26,27,28,29,30,33,34,35,39,41],\"2\":[52,53,55,64,65,67,68,69,70,72,73,74,92,93,94,100,101,103,125,126,127,128,129,131,144,145,146,148,150,151,153,154,155,161,162,163,168,169,170,172,173],\"3\":[216,217,219,264,265,267,284,285,286,301,302,303,380,381,382,408,409,410,497,498,499,520,521,523,588,589,590,597,598,599,608,609,610,640,641,642,684,685,686,696,697,699,700,702,703],\"4\":[872,873,874,1065,1066,1067,1149,1150,1151,1201,1202,1203,1533,1534,1535,1644,1645,1646,1984,1986,1987,2088,2090,2091,2365,2366,2367,2384,2385,2387,2445,2446,2447,2572,2573,2574,2748,2749,2751,2792,2793,2795,2805,2806,2807],\"5\":[3500,3502,3503,4256,4257,4258,4592,4593,4594,4800,4801,4802,6128,6129,6131,6588,6589,6590,7940,7941,7942,8356,8357,8359,9456,9457,9458,9544,9546,9547,9776,9777,9779,10300,10301,10302,11000,11002,11003,11176,11177,11179,11216,11217,11219],\"6\":[14005,14006,14007,17037,17038,17039,18380,18382,18383,19213,19214,19215,24520,24522,24523,26364,26365,26366,31772,31773,31775,33432,33434,33435,37836,37838,37839,38180,38181,38182,39112,39113,39115,41212,41213,41215,44004,44005,44007,44712,44713,44714,44872,44873,44875],\"7\":[56016,56017,56019,68144,68146,68147,73524,73525,73527,76848,76849,76851,98084,98086,98087,105469,105470,105471,127096,127097,127099,133732,133733,133735,151348,151349,151351,152732,152734,152735,156456,156458,156459,164856,164858,164859,176025,176026,176027,178860,178861,178862,179496,179497,179498],\"8\":[224073,224074,224075,272581,272582,272583,294104,294105,294107,307401,307402,307403,392340,392341,392343,421872,421874,421875,508392,508393,508395,534936,534938,534939,605400,605401,605403,610933,610934,610935,625828,625830,625831,659428,659429,659430,704096,704098,704099,715453,715454,715455,717996,717997,717999],\"9\":[896289,896290,896291,1090320,1090322,1090323,1176425,1176426,1176427,1229601,1229602,1229603,1569369,1569370,1569371,1687492,1687493,1687495,2033577,2033578,2033579,2139748,2139750,2139751,2421608,2421610,2421611,2443728,2443729,2443731,2503316,2503317,2503319,2637724,2637726,2637727,2816388,2816389,2816391,2861808,2861810,2861811,2871993,2871994,2871995]}",
+  )
+}
+
+///|
+test "moc oracle set-22-union" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 8/205954 206496 208264 215872 239058 261608 318662 342192 470568 485813 512890 538114 655570 668307 749290",
+    limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 8/50172 93111 101945 176818 204253 239770 356069 466969 472340 525770 540890 615953 655371 741709 746109",
+    limits,
+  )
+  let actual = a.union(b, limits)
+  moc_oracle_assert(
+    "set-22-union",
+    actual,
+    8,
+    [
+      (0, 67108864),
+      (95345664, 95346688),
+      (104391680, 104392704),
+      (181061632, 181062656),
+      (209155072, 209156096),
+      (210896896, 210897920),
+      (211451904, 211452928),
+      (213262336, 213263360),
+      (221052928, 221053952),
+      (244795392, 244796416),
+      (245524480, 245525504),
+      (267886592, 267887616),
+      (326309888, 326310912),
+      (350404608, 350405632),
+      (364614656, 364615680),
+      (478176256, 478177280),
+      (481861632, 481862656),
+      (483676160, 483677184),
+      (497472512, 497473536),
+      (525199360, 525200384),
+      (538388480, 538389504),
+      (551028736, 551029760),
+      (553871360, 553872384),
+      (630735872, 630736896),
+      (671099904, 671100928),
+      (671303680, 671304704),
+      (684346368, 684347392),
+      (759510016, 759511040),
+      (764015616, 764016640),
+      (767272960, 767273984),
+    ],
+    [
+      4, 355255, 364089, 438962, 466397, 468098, 468640, 470408, 478016, 501202,
+      501914, 523752, 580806, 604336, 618213, 729113, 732712, 734484, 747957, 775034,
+      787914, 800258, 803034, 878097, 917515, 917714, 930451, 1003853, 1008253, 1011434,
+    ],
+    "0/0 8/93111 101945 176818 204253 205954 206496 208264 215872 239058 239770 261608 318662 342192 356069 466969 470568 472340 485813 512890 525770 538114 540890 615953 655371 655570 668307 741709 746109 749290",
+    "{\"0\":[0],\"8\":[93111,101945,176818,204253,205954,206496,208264,215872,239058,239770,261608,318662,342192,356069,466969,470568,472340,485813,512890,525770,538114,540890,615953,655371,655570,668307,741709,746109,749290]}",
+  )
+}
+
+///|
+test "moc oracle set-22-intersection" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 8/205954 206496 208264 215872 239058 261608 318662 342192 470568 485813 512890 538114 655570 668307 749290",
+    limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 8/50172 93111 101945 176818 204253 239770 356069 466969 472340 525770 540890 615953 655371 741709 746109",
+    limits,
+  )
+  let actual = a.intersection(b, limits)
+  moc_oracle_assert(
+    "set-22-intersection",
+    actual,
+    8,
+    [(0, 33554432), (51376128, 51377152)],
+    [16, 17, 312316],
+    "1/0-1 8/50172",
+    "{\"1\":[0,1],\"8\":[50172]}",
+  )
+}
+
+///|
+test "moc oracle set-22-difference" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 8/205954 206496 208264 215872 239058 261608 318662 342192 470568 485813 512890 538114 655570 668307 749290",
+    limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 8/50172 93111 101945 176818 204253 239770 356069 466969 472340 525770 540890 615953 655371 741709 746109",
+    limits,
+  )
+  let actual = a.difference(b, limits)
+  moc_oracle_assert(
+    "set-22-difference",
+    actual,
+    8,
+    [
+      (33554432, 51376128),
+      (51377152, 67108864),
+      (210896896, 210897920),
+      (211451904, 211452928),
+      (213262336, 213263360),
+      (221052928, 221053952),
+      (244795392, 244796416),
+      (267886592, 267887616),
+      (326309888, 326310912),
+      (350404608, 350405632),
+      (481861632, 481862656),
+      (497472512, 497473536),
+      (525199360, 525200384),
+      (551028736, 551029760),
+      (671303680, 671304704),
+      (684346368, 684347392),
+      (767272960, 767273984),
+    ],
+    [
+      18, 77, 78, 79, 305, 306, 307, 1216, 1217, 1218, 4876, 4877, 4878, 19516, 19517,
+      19518, 78076, 78077, 78078, 312317, 312318, 312319, 468098, 468640, 470408,
+      478016, 501202, 523752, 580806, 604336, 732712, 747957, 775034, 800258, 917714,
+      930451, 1011434,
+    ],
+    "1/2 2/13-15 3/49-51 4/192-194 5/780-782 6/3132-3134 7/12540-12542 8/50173-50175 205954 206496 208264 215872 239058 261608 318662 342192 470568 485813 512890 538114 655570 668307 749290",
+    "{\"1\":[2],\"2\":[13,14,15],\"3\":[49,50,51],\"4\":[192,193,194],\"5\":[780,781,782],\"6\":[3132,3133,3134],\"7\":[12540,12541,12542],\"8\":[50173,50174,50175,205954,206496,208264,215872,239058,261608,318662,342192,470568,485813,512890,538114,655570,668307,749290]}",
+  )
+}
+
+///|
+test "moc oracle set-22-complement" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 8/205954 206496 208264 215872 239058 261608 318662 342192 470568 485813 512890 538114 655570 668307 749290",
+    limits,
+  )
+  let actual = a.complement(limits)
+  moc_oracle_assert(
+    "set-22-complement",
+    actual,
+    8,
+    [
+      (67108864, 210896896),
+      (210897920, 211451904),
+      (211452928, 213262336),
+      (213263360, 221052928),
+      (221053952, 244795392),
+      (244796416, 267886592),
+      (267887616, 326309888),
+      (326310912, 350404608),
+      (350405632, 481861632),
+      (481862656, 497472512),
+      (497473536, 525199360),
+      (525200384, 551028736),
+      (551029760, 671303680),
+      (671304704, 684346368),
+      (684347392, 767272960),
+      (767273984, 805306368),
+    ],
+    [
+      5, 6, 10, 13, 32, 33, 34, 37, 38, 39, 46, 49, 50, 51, 57, 58, 59, 60, 62, 63,
+      112, 113, 115, 117, 118, 119, 120, 121, 123, 124, 125, 126, 140, 142, 143,
+      144, 145, 146, 176, 177, 179, 180, 181, 183, 188, 190, 191, 192, 193, 194,
+      225, 226, 244, 245, 247, 456, 458, 464, 465, 467, 488, 490, 491, 508, 509,
+      510, 564, 565, 566, 588, 589, 591, 712, 713, 714, 728, 729, 731, 757, 758,
+      759, 780, 782, 783, 897, 898, 899, 909, 910, 911, 984, 985, 986, 1829, 1831,
+      1836, 1838, 1839, 1864, 1865, 1866, 1956, 1958, 1959, 2044, 2046, 2047, 2269,
+      2270, 2271, 2361, 2362, 2363, 2860, 2861, 2863, 2920, 2922, 2923, 3024, 3025,
+      3026, 3124, 3125, 3127, 3585, 3586, 3587, 3632, 3633, 3635, 3948, 3949, 3951,
+      7312, 7313, 7315, 7320, 7321, 7323, 7348, 7349, 7351, 7468, 7470, 7471, 7828,
+      7829, 7830, 8180, 8181, 8182, 9072, 9073, 9074, 9440, 9441, 9443, 11449, 11450,
+      11451, 11684, 11685, 11687, 12108, 12110, 12111, 12505, 12506, 12507, 14336,
+      14337, 14338, 14536, 14537, 14539, 15800, 15801, 15802, 29257, 29258, 29259,
+      29288, 29289, 29291, 29401, 29402, 29403, 29877, 29878, 29879, 31324, 31326,
+      31327, 32732, 32733, 32735, 36301, 36302, 36303, 37768, 37769, 37770, 45792,
+      45793, 45795, 46744, 46745, 46746, 48436, 48437, 48438, 50017, 50018, 50019,
+      57356, 57358, 57359, 58152, 58154, 58155, 63212, 63213, 63215, 117025, 117026,
+      117027, 117161, 117162, 117163, 117600, 117601, 117603, 119505, 119506, 119507,
+      125301, 125302, 125303, 130936, 130937, 130939, 145200, 145202, 145203, 151085,
+      151086, 151087, 183176, 183177, 183179, 186988, 186990, 186991, 193756, 193757,
+      193759, 200065, 200066, 200067, 229429, 229430, 229431, 232613, 232614, 232615,
+      252856, 252857, 252859, 468096, 468097, 468099, 468641, 468642, 468643, 470409,
+      470410, 470411, 478017, 478018, 478019, 501200, 501201, 501203, 523753, 523754,
+      523755, 580804, 580805, 580807, 604337, 604338, 604339, 732713, 732714, 732715,
+      747956, 747958, 747959, 775032, 775033, 775035, 800256, 800257, 800259, 917712,
+      917713, 917715, 930448, 930449, 930450, 1011432, 1011433, 1011435,
+    ],
+    "0/1-2 6 9 1/16-18 21-23 30 33-35 41-44 46-47 2/48-49 51 53-57 59-62 76 78-82 112-113 115-117 119 124 126-130 161-162 180-181 183 3/200 202 208-209 211 232 234-235 252-254 308-310 332-333 335 456-458 472-473 475 501-503 524 526-527 641-643 653-655 728-730 4/805 807 812 814-815 840-842 932 934-935 1020 1022-1023 1245-1247 1337-1339 1836-1837 1839 1896 1898-1899 2000-2002 2100-2101 2103 2561-2563 2608-2609 2611 2924-2925 2927 5/3216-3217 3219 3224-3225 3227 3252-3253 3255 3372 3374-3375 3732-3734 4084-4086 4976-4978 5344-5345 5347 7353-7355 7588-7589 7591 8012 8014-8015 8409-8411 10240-10242 10440-10441 10443 11704-11706 6/12873-12875 12904-12905 12907 13017-13019 13493-13495 14940 14942-14943 16348-16349 16351 19917-19919 21384-21386 29408-29409 29411 30360-30362 32052-32054 33633-33635 40972 40974-40975 41768 41770-41771 46828-46829 46831 7/51489-51491 51625-51627 52064-52065 52067 53969-53971 59765-59767 65400-65401 65403 79664 79666-79667 85549-85551 117640-117641 117643 121452 121454-121455 128220-128221 128223 134529-134531 163893-163895 167077-167079 187320-187321 187323 8/205952-205953 205955 206497-206499 208265-208267 215873-215875 239056-239057 239059 261609-261611 318660-318661 318663 342193-342195 470569-470571 485812 485814-485815 512888-512889 512891 538112-538113 538115 655568-655569 655571 668304-668306 749288-749289 749291",
+    "{\"0\":[1,2,6,9],\"1\":[16,17,18,21,22,23,30,33,34,35,41,42,43,44,46,47],\"2\":[48,49,51,53,54,55,56,57,59,60,61,62,76,78,79,80,81,82,112,113,115,116,117,119,124,126,127,128,129,130,161,162,180,181,183],\"3\":[200,202,208,209,211,232,234,235,252,253,254,308,309,310,332,333,335,456,457,458,472,473,475,501,502,503,524,526,527,641,642,643,653,654,655,728,729,730],\"4\":[805,807,812,814,815,840,841,842,932,934,935,1020,1022,1023,1245,1246,1247,1337,1338,1339,1836,1837,1839,1896,1898,1899,2000,2001,2002,2100,2101,2103,2561,2562,2563,2608,2609,2611,2924,2925,2927],\"5\":[3216,3217,3219,3224,3225,3227,3252,3253,3255,3372,3374,3375,3732,3733,3734,4084,4085,4086,4976,4977,4978,5344,5345,5347,7353,7354,7355,7588,7589,7591,8012,8014,8015,8409,8410,8411,10240,10241,10242,10440,10441,10443,11704,11705,11706],\"6\":[12873,12874,12875,12904,12905,12907,13017,13018,13019,13493,13494,13495,14940,14942,14943,16348,16349,16351,19917,19918,19919,21384,21385,21386,29408,29409,29411,30360,30361,30362,32052,32053,32054,33633,33634,33635,40972,40974,40975,41768,41770,41771,46828,46829,46831],\"7\":[51489,51490,51491,51625,51626,51627,52064,52065,52067,53969,53970,53971,59765,59766,59767,65400,65401,65403,79664,79666,79667,85549,85550,85551,117640,117641,117643,121452,121454,121455,128220,128221,128223,134529,134530,134531,163893,163894,163895,167077,167078,167079,187320,187321,187323],\"8\":[205952,205953,205955,206497,206498,206499,208265,208266,208267,215873,215874,215875,239056,239057,239059,261609,261610,261611,318660,318661,318663,342193,342194,342195,470569,470570,470571,485812,485814,485815,512888,512889,512891,538112,538113,538115,655568,655569,655571,668304,668305,668306,749288,749289,749291]}",
+  )
+}
+
+///|
+test "moc oracle set-23-union" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 8/65668 126887 176576 228873 263455 394523 440696 444254 508122 524713 565763 612907 714597 765685 778837 783694",
+    limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 9/322346 451707 1084721 1227848 1256217 1418851 1504168 1663139 1750945 1921164 1957884 1977444 2122330 2142986 3024583",
+    limits,
+  )
+  let actual = a.union(b, limits)
+  moc_oracle_assert(
+    "set-23-union",
+    actual,
+    9,
+    [
+      (0, 67108864),
+      (67244032, 67245056),
+      (82520576, 82520832),
+      (115636992, 115637248),
+      (129932288, 129933312),
+      (180813824, 180814848),
+      (234365952, 234366976),
+      (269777920, 269778944),
+      (277688576, 277688832),
+      (314329088, 314329344),
+      (321591552, 321591808),
+      (363225856, 363226112),
+      (385067008, 385067264),
+      (403991552, 403992576),
+      (425763584, 425763840),
+      (448241920, 448242176),
+      (451272704, 451273728),
+      (454916096, 454917120),
+      (491817984, 491818240),
+      (501218304, 501218560),
+      (506225664, 506225920),
+      (520316928, 520317952),
+      (537306112, 537307136),
+      (543316480, 543316736),
+      (548604416, 548604672),
+      (579341312, 579342336),
+      (627616768, 627617792),
+      (731747328, 731748352),
+      (774293248, 774293504),
+      (784061440, 784062464),
+      (797529088, 797530112),
+      (802502656, 802503680),
+    ],
+    [
+      4, 327812, 389031, 438720, 491017, 525599, 656667, 702840, 706398, 770266,
+      786857, 827907, 875051, 976741, 1027829, 1040981, 1045838, 1370922, 1500283,
+      2133297, 2276424, 2304793, 2467427, 2552744, 2711715, 2799521, 2969740, 3006460,
+      3026020, 3170906, 3191562, 4073159,
+    ],
+    "0/0 8/65668 126887 176576 228873 263455 394523 440696 444254 508122 524713 565763 612907 714597 765685 778837 783694 9/322346 451707 1084721 1227848 1256217 1418851 1504168 1663139 1750945 1921164 1957884 1977444 2122330 2142986 3024583",
+    "{\"0\":[0],\"8\":[65668,126887,176576,228873,263455,394523,440696,444254,508122,524713,565763,612907,714597,765685,778837,783694],\"9\":[322346,451707,1084721,1227848,1256217,1418851,1504168,1663139,1750945,1921164,1957884,1977444,2122330,2142986,3024583]}",
+  )
+}
+
+///|
+test "moc oracle set-23-intersection" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 8/65668 126887 176576 228873 263455 394523 440696 444254 508122 524713 565763 612907 714597 765685 778837 783694",
+    limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 9/322346 451707 1084721 1227848 1256217 1418851 1504168 1663139 1750945 1921164 1957884 1977444 2122330 2142986 3024583",
+    limits,
+  )
+  let actual = a.intersection(b, limits)
+  moc_oracle_assert(
+    "set-23-intersection",
+    actual,
+    9,
+    [(0, 33554432)],
+    [16, 17],
+    "1/0-1 9/",
+    "{\"1\":[0,1],\"9\":[]}",
+  )
+}
+
+///|
+test "moc oracle set-23-difference" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 8/65668 126887 176576 228873 263455 394523 440696 444254 508122 524713 565763 612907 714597 765685 778837 783694",
+    limits,
+  )
+  let b = Moc::from_ascii(
+    "1/0-1 9/322346 451707 1084721 1227848 1256217 1418851 1504168 1663139 1750945 1921164 1957884 1977444 2122330 2142986 3024583",
+    limits,
+  )
+  let actual = a.difference(b, limits)
+  moc_oracle_assert(
+    "set-23-difference",
+    actual,
+    9,
+    [
+      (33554432, 67108864),
+      (67244032, 67245056),
+      (129932288, 129933312),
+      (180813824, 180814848),
+      (234365952, 234366976),
+      (269777920, 269778944),
+      (403991552, 403992576),
+      (451272704, 451273728),
+      (454916096, 454917120),
+      (520316928, 520317952),
+      (537306112, 537307136),
+      (579341312, 579342336),
+      (627616768, 627617792),
+      (731747328, 731748352),
+      (784061440, 784062464),
+      (797529088, 797530112),
+      (802502656, 802503680),
+    ],
+    [
+      18, 19, 327812, 389031, 438720, 491017, 525599, 656667, 702840, 706398, 770266,
+      786857, 827907, 875051, 976741, 1027829, 1040981, 1045838,
+    ],
+    "1/2-3 8/65668 126887 176576 228873 263455 394523 440696 444254 508122 524713 565763 612907 714597 765685 778837 783694 9/",
+    "{\"1\":[2,3],\"8\":[65668,126887,176576,228873,263455,394523,440696,444254,508122,524713,565763,612907,714597,765685,778837,783694],\"9\":[]}",
+  )
+}
+
+///|
+test "moc oracle set-23-complement" {
+  let limits = MocLimits::default()
+  let a = Moc::from_ascii(
+    "0/0 8/65668 126887 176576 228873 263455 394523 440696 444254 508122 524713 565763 612907 714597 765685 778837 783694",
+    limits,
+  )
+  let actual = a.complement(limits)
+  moc_oracle_assert(
+    "set-23-complement",
+    actual,
+    8,
+    [
+      (67108864, 67244032),
+      (67245056, 129932288),
+      (129933312, 180813824),
+      (180814848, 234365952),
+      (234366976, 269777920),
+      (269778944, 403991552),
+      (403992576, 451272704),
+      (451273728, 454916096),
+      (454917120, 520316928),
+      (520317952, 537306112),
+      (537307136, 579341312),
+      (579342336, 627616768),
+      (627617792, 731747328),
+      (731748352, 784061440),
+      (784062464, 797529088),
+      (797530112, 802502656),
+      (802503680, 805306368),
+    ],
+    [
+      9, 21, 22, 24, 25, 27, 28, 30, 31, 33, 34, 35, 41, 44, 45, 46, 49, 51, 52,
+      54, 55, 56, 57, 58, 60, 61, 81, 82, 83, 92, 93, 95, 104, 105, 106, 116, 117,
+      118, 129, 130, 131, 161, 162, 163, 168, 169, 170, 173, 174, 175, 189, 190,
+      191, 193, 194, 195, 200, 201, 203, 212, 214, 215, 236, 237, 239, 248, 249,
+      251, 252, 253, 321, 322, 323, 376, 377, 378, 429, 430, 431, 476, 477, 478,
+      512, 514, 515, 640, 642, 643, 684, 685, 687, 688, 690, 691, 753, 754, 755,
+      769, 770, 771, 809, 810, 811, 852, 853, 855, 952, 954, 955, 1000, 1001, 1002,
+      1017, 1018, 1019, 1020, 1022, 1023, 1281, 1282, 1283, 1516, 1517, 1518, 1712,
+      1714, 1715, 1916, 1917, 1919, 2052, 2054, 2055, 2564, 2566, 2567, 2744, 2746,
+      2747, 2756, 2757, 2758, 3009, 3010, 3011, 3072, 3074, 3075, 3232, 3233, 3235,
+      3416, 3417, 3419, 3812, 3813, 3814, 4012, 4013, 4015, 4064, 4065, 4067, 4084,
+      4086, 4087, 5120, 5121, 5123, 6076, 6077, 6079, 6852, 6853, 6854, 7673, 7674,
+      7675, 8213, 8214, 8215, 10261, 10262, 10263, 10980, 10982, 10983, 11036, 11038,
+      11039, 12032, 12033, 12034, 12292, 12293, 12295, 12937, 12938, 12939, 13673,
+      13674, 13675, 15260, 15262, 15263, 16056, 16057, 16058, 16264, 16266, 16267,
+      16340, 16342, 16343, 20489, 20490, 20491, 24312, 24313, 24315, 27421, 27422,
+      27423, 30689, 30690, 30691, 32848, 32850, 32851, 41040, 41042, 41043, 43924,
+      43925, 43926, 44148, 44150, 44151, 48140, 48142, 48143, 49176, 49177, 49179,
+      51745, 51746, 51747, 54688, 54689, 54691, 61044, 61045, 61047, 64236, 64237,
+      64238, 65060, 65062, 65063, 65365, 65366, 65367, 81952, 81954, 81955, 97256,
+      97258, 97259, 109681, 109682, 109683, 122752, 122753, 122755, 131396, 131397,
+      131398, 164164, 164165, 164167, 175708, 175709, 175711, 176596, 176597, 176598,
+      192564, 192565, 192567, 196712, 196713, 196715, 206977, 206978, 206979, 218760,
+      218761, 218763, 244184, 244186, 244187, 256956, 256958, 256959, 260244, 260246,
+      260247, 261456, 261457, 261458, 327813, 327814, 327815, 389028, 389029, 389030,
+      438721, 438722, 438723, 491016, 491018, 491019, 525596, 525597, 525598, 656664,
+      656665, 656666, 702841, 702842, 702843, 706396, 706397, 706399, 770264, 770265,
+      770267, 786856, 786858, 786859, 827904, 827905, 827906, 875048, 875049, 875050,
+      976740, 976742, 976743, 1027828, 1027830, 1027831, 1040980, 1040982, 1040983,
+      1045836, 1045837, 1045839,
+    ],
+    "0/5 1/5-6 8-9 11-12 14-15 17-19 25 28-30 33 35-36 38-42 44-45 2/17-19 28-29 31 40-42 52-54 65-67 97-99 104-106 109-111 125-127 129-131 136-137 139 148 150-151 172-173 175 184-185 187-189 3/65-67 120-122 173-175 220-222 256 258-259 384 386-387 428-429 431-432 434-435 497-499 513-515 553-555 596-597 599 696 698-699 744-746 761-764 766-767 4/257-259 492-494 688 690-691 892-893 895 1028 1030-1031 1540 1542-1543 1720 1722-1723 1732-1734 1985-1987 2048 2050-2051 2208-2209 2211 2392-2393 2395 2788-2790 2988-2989 2991 3040-3041 3043 3060 3062-3063 5/1024-1025 1027 1980-1981 1983 2756-2758 3577-3579 4117-4119 6165-6167 6884 6886-6887 6940 6942-6943 7936-7938 8196-8197 8199 8841-8843 9577-9579 11164 11166-11167 11960-11962 12168 12170-12171 12244 12246-12247 6/4105-4107 7928-7929 7931 11037-11039 14305-14307 16464 16466-16467 24656 24658-24659 27540-27542 27764 27766-27767 31756 31758-31759 32792-32793 32795 35361-35363 38304-38305 38307 44660-44661 44663 47852-47854 48676 48678-48679 48981-48983 7/16416 16418-16419 31720 31722-31723 44145-44147 57216-57217 57219 65860-65862 98628-98629 98631 110172-110173 110175 111060-111062 127028-127029 127031 131176-131177 131179 141441-141443 153224-153225 153227 178648 178650-178651 191420 191422-191423 194708 194710-194711 195920-195922 8/65669-65671 126884-126886 176577-176579 228872 228874-228875 263452-263454 394520-394522 440697-440699 444252-444253 444255 508120-508121 508123 524712 524714-524715 565760-565762 612904-612906 714596 714598-714599 765684 765686-765687 778836 778838-778839 783692-783693 783695",
+    "{\"0\":[5],\"1\":[5,6,8,9,11,12,14,15,17,18,19,25,28,29,30,33,35,36,38,39,40,41,42,44,45],\"2\":[17,18,19,28,29,31,40,41,42,52,53,54,65,66,67,97,98,99,104,105,106,109,110,111,125,126,127,129,130,131,136,137,139,148,150,151,172,173,175,184,185,187,188,189],\"3\":[65,66,67,120,121,122,173,174,175,220,221,222,256,258,259,384,386,387,428,429,431,432,434,435,497,498,499,513,514,515,553,554,555,596,597,599,696,698,699,744,745,746,761,762,763,764,766,767],\"4\":[257,258,259,492,493,494,688,690,691,892,893,895,1028,1030,1031,1540,1542,1543,1720,1722,1723,1732,1733,1734,1985,1986,1987,2048,2050,2051,2208,2209,2211,2392,2393,2395,2788,2789,2790,2988,2989,2991,3040,3041,3043,3060,3062,3063],\"5\":[1024,1025,1027,1980,1981,1983,2756,2757,2758,3577,3578,3579,4117,4118,4119,6165,6166,6167,6884,6886,6887,6940,6942,6943,7936,7937,7938,8196,8197,8199,8841,8842,8843,9577,9578,9579,11164,11166,11167,11960,11961,11962,12168,12170,12171,12244,12246,12247],\"6\":[4105,4106,4107,7928,7929,7931,11037,11038,11039,14305,14306,14307,16464,16466,16467,24656,24658,24659,27540,27541,27542,27764,27766,27767,31756,31758,31759,32792,32793,32795,35361,35362,35363,38304,38305,38307,44660,44661,44663,47852,47853,47854,48676,48678,48679,48981,48982,48983],\"7\":[16416,16418,16419,31720,31722,31723,44145,44146,44147,57216,57217,57219,65860,65861,65862,98628,98629,98631,110172,110173,110175,111060,111061,111062,127028,127029,127031,131176,131177,131179,141441,141442,141443,153224,153225,153227,178648,178650,178651,191420,191422,191423,194708,194710,194711,195920,195921,195922],\"8\":[65669,65670,65671,126884,126885,126886,176577,176578,176579,228872,228874,228875,263452,263453,263454,394520,394521,394522,440697,440698,440699,444252,444253,444255,508120,508121,508123,524712,524714,524715,565760,565761,565762,612904,612905,612906,714596,714598,714599,765684,765686,765687,778836,778838,778839,783692,783693,783695]}",
+  )
+}
+
+///|
+test "moc polygon cover interop equator" {
+  let grid = Grid::from_level(5)
+  let polygon = SphericalPolygon::new(
+    [
+      LonLat::degrees(25.0, -8.0),
+      LonLat::degrees(55.0, -8.0),
+      LonLat::degrees(55.0, 12.0),
+      LonLat::degrees(25.0, 12.0),
+    ],
+    16,
+  )
+  let cover = grid.cover_polygon(polygon, 2, grid.npix(), 500000)
+  let centers = grid.search_polygon(polygon, grid.npix(), 500000).pixels()
+  let limits = MocLimits::default()
+  let interior = Moc::from_pixel_set(cover.interior(), grid.level(), limits)
+  let boundary = Moc::from_pixel_set(cover.boundary(), grid.level(), limits)
+  let footprint = Moc::from_pixel_set(cover.pixels(), grid.level(), limits)
+  assert_true(interior.union(boundary, limits).equals(footprint))
+  assert_eq(interior.intersection(boundary, limits).uniq(limits), [])
+  moc_cover_export("equator:cover", cover.pixels())
+  moc_cover_export("equator:interior", cover.interior())
+  moc_cover_export("equator:boundary", cover.boundary())
+  moc_cover_export("equator:centers", centers)
+}
+
+///|
+test "moc polygon cover interop seam" {
+  let grid = Grid::from_level(5)
+  let polygon = SphericalPolygon::new(
+    [
+      LonLat::degrees(350.0, -12.0),
+      LonLat::degrees(10.0, -12.0),
+      LonLat::degrees(10.0, 12.0),
+      LonLat::degrees(350.0, 12.0),
+    ],
+    16,
+  )
+  let cover = grid.cover_polygon(polygon, 2, grid.npix(), 500000)
+  let centers = grid.search_polygon(polygon, grid.npix(), 500000).pixels()
+  let limits = MocLimits::default()
+  let interior = Moc::from_pixel_set(cover.interior(), grid.level(), limits)
+  let boundary = Moc::from_pixel_set(cover.boundary(), grid.level(), limits)
+  let footprint = Moc::from_pixel_set(cover.pixels(), grid.level(), limits)
+  assert_true(interior.union(boundary, limits).equals(footprint))
+  assert_eq(interior.intersection(boundary, limits).uniq(limits), [])
+  moc_cover_export("seam:cover", cover.pixels())
+  moc_cover_export("seam:interior", cover.interior())
+  moc_cover_export("seam:boundary", cover.boundary())
+  moc_cover_export("seam:centers", centers)
+}
+
+///|
+test "moc polygon cover interop north" {
+  let grid = Grid::from_level(5)
+  let polygon = SphericalPolygon::new(
+    [
+      LonLat::degrees(0.0, 65.0),
+      LonLat::degrees(120.0, 65.0),
+      LonLat::degrees(240.0, 65.0),
+    ],
+    16,
+  )
+  let cover = grid.cover_polygon(polygon, 2, grid.npix(), 500000)
+  let centers = grid.search_polygon(polygon, grid.npix(), 500000).pixels()
+  let limits = MocLimits::default()
+  let interior = Moc::from_pixel_set(cover.interior(), grid.level(), limits)
+  let boundary = Moc::from_pixel_set(cover.boundary(), grid.level(), limits)
+  let footprint = Moc::from_pixel_set(cover.pixels(), grid.level(), limits)
+  assert_true(interior.union(boundary, limits).equals(footprint))
+  assert_eq(interior.intersection(boundary, limits).uniq(limits), [])
+  moc_cover_export("north:cover", cover.pixels())
+  moc_cover_export("north:interior", cover.interior())
+  moc_cover_export("north:boundary", cover.boundary())
+  moc_cover_export("north:centers", centers)
+}
+
+///|
+test "moc polygon cover interop south" {
+  let grid = Grid::from_level(5)
+  let polygon = SphericalPolygon::new(
+    [
+      LonLat::degrees(0.0, -65.0),
+      LonLat::degrees(120.0, -65.0),
+      LonLat::degrees(240.0, -65.0),
+    ],
+    16,
+  )
+  let cover = grid.cover_polygon(polygon, 2, grid.npix(), 500000)
+  let centers = grid.search_polygon(polygon, grid.npix(), 500000).pixels()
+  let limits = MocLimits::default()
+  let interior = Moc::from_pixel_set(cover.interior(), grid.level(), limits)
+  let boundary = Moc::from_pixel_set(cover.boundary(), grid.level(), limits)
+  let footprint = Moc::from_pixel_set(cover.pixels(), grid.level(), limits)
+  assert_true(interior.union(boundary, limits).equals(footprint))
+  assert_eq(interior.intersection(boundary, limits).uniq(limits), [])
+  moc_cover_export("south:cover", cover.pixels())
+  moc_cover_export("south:interior", cover.interior())
+  moc_cover_export("south:boundary", cover.boundary())
+  moc_cover_export("south:centers", centers)
+}

@@ -39,3 +39,4 @@ jobs:
           moon run examples/catalog --target ${{ matrix.target }}
           moon run examples/observations --target ${{ matrix.target }}
           moon run examples/simulation --target ${{ matrix.target }}
+          moon run examples/spatial --target ${{ matrix.target }}

@@ -15,6 +15,7 @@ pub struct Catalog {
   sources : Array[LonLat]
   indices : Array[(Int32, Int32)]
   bins : Array[CatalogBin]
+  tree : Array[CatalogNode]
 }
 
 ///|
@@ -45,7 +46,11 @@ pub fn Catalog::new(
     bins.push({ pixel, start, end, center, radius, })
     start = end
   }
-  { grid, sources: sources.copy(), indices, bins, }
+  let tree : Array[CatalogNode] = []
+  if !bins.is_empty() {
+    build_catalog_tree(bins, 0, bins.length(), tree) |> ignore
+  }
+  { grid, sources: sources.copy(), indices, bins, tree, }
 }
 
 ///|
@@ -132,7 +137,7 @@ pub fn SourceHit::distance(self : SourceHit) -> Double {
 
 ///|
 /// Exact closed cone filter over sources, sorted by distance then input index.
-/// Work is occupied-bin visits plus tested sources. It does not use the
+/// Work is bounding-tree node visits plus tested sources. It does not use the
 /// center-only pixel selection as a source candidate cover.
 pub fn Catalog::query_cone(
   self : Catalog,
@@ -141,43 +146,7 @@ pub fn Catalog::query_cone(
   max_hits : Int32,
   max_work : Int32,
 ) -> Array[SourceHit] raise HealpixError {
-  validate_query(radius, max_hits, max_work)
-  let vector = center.vector()
-  let hits : Array[SourceHit] = []
-  let mut work = 0
-  for bin in self.bins {
-    if work >= max_work {
-      raise ResourceLimit
-    }
-    work = work + 1
-    if vector.separation(bin.center) > radius + bin.radius + 1.0e-14 {
-      continue
-    }
-    for i = bin.start; i < bin.end; i = i + 1 {
-      if work >= max_work {
-        raise ResourceLimit
-      }
-      work = work + 1
-      let index = self.indices[i].1
-      let distance = vector.separation(self.sources[index].vector())
-      if distance <= radius {
-        if hits.length() >= max_hits {
-          raise ResourceLimit
-        }
-        hits.push({ index, distance, })
-      }
-    }
-  }
-  hits.sort_by(fn(a, b) {
-    if a.distance < b.distance {
-      -1
-    } else if a.distance > b.distance {
-      1
-    } else {
-      a.index - b.index
-    }
-  })
-  hits
+  self.search_cone(center, radius, max_hits, max_work).hits
 }
 
 ///|

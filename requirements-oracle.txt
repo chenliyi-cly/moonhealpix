@@ -1,7 +1,7 @@
 # Independent offline oracle for MoonHEALPix; SPDX-License-Identifier: BSD-3-Clause.
 # Sources: https://github.com/astropy/astropy-healpix/tree/v1.1.3
 # The generator uses preinstalled packages and never installs or downloads them.
-# Pin direct and transitive dependencies to the supplied oracle environment.
+# Original indexing oracle environment pins below; new region/MOC direct references follow.
 astropy-healpix==1.1.3
 numpy==2.5.4
 astropy==8.0.2
@@ -9,3 +9,7 @@ pyerfa==2.0.1.5
 astropy-iers-data==0.2026.11.9.0.35.9
 packaging==26.3
 PyYAML==6.0.3
+
+# Optional regeneration of region and spatial MOC fixtures (no runtime dependency).
+spherical-geometry==1.3.3
+mocpy==0.21.0
