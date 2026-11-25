@@ -19,7 +19,7 @@ jobs:
       - name: Install official MoonBit stable toolchain
         run: |
           curl --fail --silent --show-error --location https://cli.moonbitlang.com/install/unix.sh --output /tmp/install-moon.sh
-          bash /tmp/install-moon.sh 0.1.20261119
+          bash /tmp/install-moon.sh latest
           echo "$HOME/.moon/bin" >> "$GITHUB_PATH"
       - name: Verify compiler requirement
         run: python3 tools/check_version.py

@@ -1,6 +1,6 @@
 # 测试与复现
 
-使用 MoonBit 0.1.20261119 工具链（moonc 0.10.22，2026-11-19），执行 `moon info`、`moon fmt --check`，运行 `python3 tools/check_version.py` 核对固定工具链，再对 wasm-gc、wasm、js、native 分别执行 `moon check --target TARGET --deny-warn`、`moon build --target TARGET --deny-warn`、`moon test --target TARGET --deny-warn`，并运行三个 examples。native 链接需要 C 工具链；Windows 本地缺少时由 Linux CI 完成运行证明。
+本地验证使用 MoonBit 0.1.20261119（moonc 0.10.22）；CI 使用官方 stable 通道并要求 moonc >= 0.10.22。执行 `moon info`、`moon fmt --check`，运行 `python3 tools/check_version.py` 检查编译器最低版本，再对 wasm-gc、wasm、js、native 分别执行 `moon check --target TARGET --deny-warn`、`moon build --target TARGET --deny-warn`、`moon test --target TARGET --deny-warn`，并运行四个 examples。native 链接需要 C 工具链；Windows 本地缺少时由 Linux CI 完成运行证明。
 
 独立 oracle 是固定版本 `astropy-healpix==1.1.3`，完整 Python 依赖冻结在 `requirements-oracle.txt`。在独立虚拟环境安装依赖后运行：
 
