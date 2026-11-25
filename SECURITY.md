@@ -56,7 +56,7 @@ MOC 运算处理的是离散覆盖。把保守候选序列化不会消除误报�
 
 ## 依赖与验证
 
-项目要求 `moonc >= 0.10.20`，本地集成使用 `moonc v0.10.20+65efd5b93` 和 `moon 0.1.20261104`。运行前检查终端实际工具链；这不表示所有后续工具链均已验证。
+CI 固定使用 MoonBit `0.1.20261119`（`moonc v0.10.22+124d61d05`）；运行 `python3 tools/check_version.py` 可核对精确版本。其它工具链版本未由该工作流验证。
 
 生产包与 Python oracle 分离。固定独立参考包括 astropy-healpix 1.1.3、spherical-geometry 1.3.3 和 mocpy 0.21.0；其许可证和复现入口见 [THIRD_PARTY.md](THIRD_PARTY.md)。普通测试读取静态资料。依赖固定有助复现，不代表未来不存在上游漏洞。
 
