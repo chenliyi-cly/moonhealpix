@@ -21,7 +21,7 @@ jobs:
           curl --fail --silent --show-error --location https://cli.moonbitlang.com/install/unix.sh --output /tmp/install-moon.sh
           bash /tmp/install-moon.sh latest
           echo "$HOME/.moon/bin" >> "$GITHUB_PATH"
-      - name: Verify compiler requirement
+      - name: Verify exact MoonBit toolchain
         run: python3 tools/check_version.py
       - name: Interface and format
         run: |

@@ -1,9 +1,9 @@
 # MoonHEALPix
 
-MoonHEALPix 是用 MoonBit 实现的 HEALPix 球面像素库。**0.2.1** 版本提供 RING / NESTED 索引、标准八邻域、双线性插值、层级单元与区间集合、球面区域查询、保守像素覆盖、ICRS 空间 MOC、稀疏目录树和可缺失标量地图，适用于天球目录检索、观测分箱及球面模拟数据处理。
+MoonHEALPix 是用 MoonBit 实现的 HEALPix 球面像素库。**0.2.2** 版本提供 RING / NESTED 索引、标准八邻域、双线性插值、层级单元与区间集合、球面区域查询、保守像素覆盖、ICRS 空间 MOC、稀疏目录树和可缺失标量地图，适用于天球目录检索、观测分箱及球面模拟数据处理。
 
 - 模块：`chenliyi-cly/moonhealpix`；许可证：BSD-3-Clause。
-- 工具链要求：`moonc >= 0.10.22`；本地复验工具链为 `moonc v0.10.22+124d61d05` 与 `moon 0.1.20261119`，模块默认目标为 `wasm-gc`。
+- 已验证工具链：`moonc 0.10.22+124d61d05`、`moon 0.1.20261119`、`moonrun 0.1.20261119`，精确版本记录在 [`tools/moonbit-toolchain.json`](tools/moonbit-toolchain.json)；模块默认目标为 `wasm-gc`。
 - 接口以 [公开声明](pkg.generated.mbti) 为准；另见 [架构](docs/architecture.md)、[安全边界](SECURITY.md)、[第三方来源](THIRD_PARTY.md) 和 [更新日志](CHANGELOG.md)。
 
 ## 安装、运行与导入
@@ -11,7 +11,7 @@ MoonHEALPix 是用 MoonBit 实现的 HEALPix 球面像素库。**0.2.1** 版本�
 在使用方的 MoonBit 模块目录中添加固定版本依赖：
 
 ```sh
-moon add chenliyi-cly/moonhealpix@0.2.1
+moon add chenliyi-cly/moonhealpix@0.2.2
 ```
 
 开发和验证本项目时，从源码根目录运行以下命令。示例参数是包目录，不是单个源文件。
@@ -166,6 +166,6 @@ MOC 保存的是输入的离散像素覆盖。将保守候选转换成 MOC，不
 
 网格索引上限不等于稠密地图可用上限。最大网格若仅按每像素八字节计算已需 6 GiB，实际可选值布局、统计工作数组及副本会增加内存。资源预算不是超时或字节沙箱；应用仍需限制输入、并发和宿主资源。
 
-[持续集成工作流](.github/workflows/verify.yml) 使用官方 MoonBit stable 通道，并要求 `moonc >= 0.10.22`，配置了 `wasm-gc`、`wasm`、`js`、`native` 四个目标，执行接口与格式检查、严格检查、构建、测试及四个示例。这里描述工作流配置，远端执行结果以实际运行记录为准；上述本地门禁结果仅覆盖列出的三个目标。
+[持续集成工作流](.github/workflows/verify.yml) 安装官方 MoonBit stable 通道，并由版本锁文件严格核对 `moonc 0.10.22+124d61d05`、`moon 0.1.20261119`、`moonrun 0.1.20261119`；stable 安装入口本身是浮动通道，若上游版本变化，精确核对会失败而不会静默接受。工作流配置 `wasm-gc`、`wasm`、`js`、`native` 四个目标，执行接口与格式检查、严格检查、构建、测试及四个示例。MoonCakes 的 `build_status` 不公开服务端构建器版本，不能据此证明其实际工具链与本锁文件一致。
 
 本库使用浮点几何，不提供精确实数求交、坐标参考系转换、FITS 读写、球谐变换或完整 healpy 接口。
