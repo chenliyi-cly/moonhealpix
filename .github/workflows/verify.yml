@@ -19,8 +19,9 @@ jobs:
       - name: Install exact locked MoonBit toolchain
         run: |
           curl --fail --silent --show-error --location https://cli.moonbitlang.com/install/unix.sh --output /tmp/install-moon.sh
-          MOON_VERSION="$(python3 -c 'import json; print(json.load(open("tools/moonbit-toolchain.json", encoding="utf-8"))["moon"])')"
-          bash /tmp/install-moon.sh "$MOON_VERSION"
+          python3 -m unittest discover -s tools -p 'test_check_version.py'
+          MOONBIT_VERSION="$(python3 tools/check_version.py --installer-version)"
+          bash /tmp/install-moon.sh "$MOONBIT_VERSION"
           echo "$HOME/.moon/bin" >> "$GITHUB_PATH"
       - name: Verify exact MoonBit toolchain
         run: python3 tools/check_version.py

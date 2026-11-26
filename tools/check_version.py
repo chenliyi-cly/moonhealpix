@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Require the exact tested MoonBit toolchain recorded in moonbit-toolchain.json."""
+import argparse
 import json
 import re
 import subprocess
@@ -19,8 +20,20 @@ def parse_versions(output: str) -> Dict[str, str]:
             if (match := re.search(pattern, output))}
 
 
+def installer_version(versions: Dict[str, str]) -> str:
+    # Official binary/core archives use the compiler release, not the moon CLI date.
+    return versions["moonc"]
+
+
 def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--installer-version", action="store_true",
+                        help="print the official compiler archive version without running moon")
+    args = parser.parse_args()
     expected = json.loads(LOCK.read_text(encoding="utf-8"))
+    if args.installer_version:
+        print(installer_version(expected))
+        return 0
     output = subprocess.check_output(["moon", "version", "--all"], text=True)
     print(output, end="")
     actual = parse_versions(output)

@@ -1,6 +1,6 @@
 # 测试与复现
 
-已验证工具链由 `tools/moonbit-toolchain.json` 唯一记录：`moonc 0.10.22+124d61d05`、`moon 0.1.20261119`、`moonrun 0.1.20261119`。CI 从 `tools/moonbit-toolchain.json` 读取 `moon` 版本，通过官方安装脚本显式安装该版本，再运行 `python3 tools/check_version.py` 精确核对三项版本；工作流不使用浮动的 `latest`。执行 `moon info`、`moon fmt --check`，再对 wasm-gc、wasm、js、native 分别执行 `moon check --target TARGET --deny-warn`、`moon build --target TARGET --deny-warn`、`moon test --target TARGET --deny-warn`，并运行四个 examples。native 链接需要 C 工具链；Windows 本地缺少时由 Linux CI 完成运行证明。MoonCakes 公开模块元数据目前只报告构建状态，不披露服务端构建器版本；该平台构建版本不能由此项目的 GitHub CI 锁文件控制或证明。
+已验证工具链由 `tools/moonbit-toolchain.json` 唯一记录：`moonc 0.10.22+124d61d05`、`moon 0.1.20261119`、`moonrun 0.1.20261119`。CI 从 `tools/moonbit-toolchain.json` 读取 `moonc` 编译器发布号（`0.10.22+124d61d05`），通过官方安装脚本显式安装对应归档；`moon` 的日期版本号不是官方归档编号。安装后，再运行 `python3 tools/check_version.py` 精确核对三项版本；工作流不使用浮动的 `latest`。执行 `moon info`、`moon fmt --check`，再对 wasm-gc、wasm、js、native 分别执行 `moon check --target TARGET --deny-warn`、`moon build --target TARGET --deny-warn`、`moon test --target TARGET --deny-warn`，并运行四个 examples。native 链接需要 C 工具链；Windows 本地缺少时由 Linux CI 完成运行证明。MoonCakes 公开模块元数据目前只报告构建状态，不披露服务端构建器版本；该平台构建版本不能由此项目的 GitHub CI 锁文件控制或证明。
 
 独立 oracle 是固定版本 `astropy-healpix==1.1.3`，完整 Python 依赖冻结在 `requirements-oracle.txt`。在独立虚拟环境安装依赖后运行：
 
