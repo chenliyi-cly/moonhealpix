@@ -16,10 +16,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - name: Install official MoonBit stable toolchain
+      - name: Install exact locked MoonBit toolchain
         run: |
           curl --fail --silent --show-error --location https://cli.moonbitlang.com/install/unix.sh --output /tmp/install-moon.sh
-          bash /tmp/install-moon.sh latest
+          MOON_VERSION="$(python3 -c 'import json; print(json.load(open("tools/moonbit-toolchain.json", encoding="utf-8"))["moon"])')"
+          bash /tmp/install-moon.sh "$MOON_VERSION"
           echo "$HOME/.moon/bin" >> "$GITHUB_PATH"
       - name: Verify exact MoonBit toolchain
         run: python3 tools/check_version.py
